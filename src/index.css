@@ -1,0 +1,94 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Plus Jakarta Sans", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-brand-primary: #ffffff;
+  --color-brand-secondary: #c7c6c6;
+  --color-surface-base: #121414;
+  --color-surface-container: #1f2020;
+}
+
+@layer base {
+  body {
+    @apply bg-surface-base text-gray-200 font-sans antialiased;
+  }
+}
+
+.markdown-body h3, .markdown-body h4 {
+  color: #A78BFA;
+  margin: 8px 0 4px 0;
+  @apply font-display font-black uppercase tracking-tighter;
+}
+
+.markdown-body p {
+  @apply mb-3 leading-relaxed text-gray-400;
+}
+
+.markdown-body ul, .markdown-body ol {
+  padding-left: 16px;
+  margin: 4px 0;
+  @apply space-y-1;
+}
+
+.markdown-body li {
+  margin: 3px 0;
+  line-height: 1.5;
+  @apply text-gray-400;
+}
+
+.markdown-body strong {
+  color: #E2E8F0;
+  @apply font-black;
+}
+
+.markdown-body code {
+  background: #1E1B4B;
+  padding: 2px 6px;
+  border-radius: 4px;
+  @apply font-mono text-[10px];
+}
+
+.remember-box {
+  background: #1E1B4B;
+  border-left: 3px solid #7F77DD;
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-top: 10px;
+  @apply relative overflow-hidden my-4;
+}
+
+.remember-box h4 {
+  color: #7F77DD;
+  font-size: 12px;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+  @apply font-display font-black uppercase;
+}
+
+.remember-box ul {
+  @apply list-none ml-0 space-y-2;
+}
+
+.remember-box li {
+  @apply flex items-start gap-2 text-white font-bold text-xs;
+}
+
+.remember-box li::before {
+  content: "✦";
+  @apply text-yellow-500;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #474747;
+  border-radius: 10px;
+}

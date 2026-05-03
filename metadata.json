@@ -1,0 +1,9 @@
+{
+  "name": "N - CODE AI Study Buddy",
+  "description": "An AI-powered Study Buddy for Indian students providing simplified explanations, MCQs, notes, and problem-solving in English, Hindi, and Hinglish.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
