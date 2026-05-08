@@ -1,7 +1,7 @@
 {
   "name": "N-CODE",
   "short_name": "N-CODE",
-  "description": "AI powered study buddy for Indian students",
+  "description": "AI powered study buddy for students",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0F0F0F",
@@ -9,12 +9,12 @@
   "orientation": "portrait",
   "icons": [
     {
-      "src": "icon-192.png",
+      "src": "/icon-192.png",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "icon-512.png",
+      "src": "/icon-512.png",
       "sizes": "512x512",
       "type": "image/png"
     }
