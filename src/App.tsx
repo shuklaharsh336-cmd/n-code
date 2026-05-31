@@ -563,6 +563,7 @@ export default function App() {
         {showCamera && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] bg-black">
             <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+            <canvas ref={canvasRef} className="hidden" />
             <div className="absolute inset-x-0 bottom-12 flex justify-center gap-8 items-center px-8">
               <button onClick={() => setShowCamera(false)} className="p-4 bg-white/10 rounded-full"><X /></button>
               <button onClick={capture} className="w-20 h-20 bg-white rounded-full p-2 border-4 border-white/20"><div className="w-full h-full border-2 border-black rounded-full" /></button>
