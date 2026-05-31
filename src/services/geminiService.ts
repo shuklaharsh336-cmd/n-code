@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const apiKey = process.env.GEMINI_API_KEY;
 const ai = new GoogleGenAI({ apiKey: apiKey || "" });
@@ -82,6 +82,7 @@ export interface UserData {
   language: string;
   subjects?: string[];
   avatarColor?: string;
+  studyTime?: string;
 }
 
 export interface Message {
@@ -137,4 +138,143 @@ export async function chatWithNCode(
   });
 
   return response.text || "I'm sorry, I couldn't generate a response.";
+}
+
+export interface RawFlashcard {
+  front: string;
+  back: string;
+}
+
+export async function generateFlashcardsFromResponse(aiResponse: string): Promise<RawFlashcard[]> {
+  if (!apiKey) {
+    throw new Error("Gemini API key is not configured.");
+  }
+
+  const prompt = `Based on the following AI study assistant response, extract 3 to 5 key educational facts or concepts and represent them as flashcards.
+Each flashcard must have a concise, clear question or term on the "front" (maximum 15 words) and a precise, simple explanation or answer on the "back" (maximum 25 words).
+The questions and answers should be in the same language as the response (which could be English, Hindi, or Hinglish). Keep them natural, engaging, and easy to review.
+
+AI Response to evaluate:
+"""
+${aiResponse}
+"""`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              front: { type: Type.STRING, description: "Highly clear, concise question or term, maximum 15 words." },
+              back: { type: Type.STRING, description: "Simple, easy to understand explanation or answer, maximum 25 words." }
+            },
+            required: ["front", "back"]
+          }
+        },
+        maxOutputTokens: 1000
+      }
+    });
+
+    if (response.text) {
+      const parsed = JSON.parse(response.text);
+      if (Array.isArray(parsed)) {
+        return parsed as RawFlashcard[];
+      }
+    }
+    return [];
+  } catch (error) {
+    console.error("Error generating flashcards from response:", error);
+    return [];
+  }
+}
+
+export interface ChallengeQuestion {
+  type: 'mcq' | 'fill' | 'short';
+  question: string;
+  options?: string[];
+  answer: string;
+  explanation: string;
+}
+
+export async function generateDailyChallenge(
+  grade: string,
+  recentTopics: string[],
+  weakTopics: string[]
+): Promise<ChallengeQuestion[]> {
+  if (!apiKey) {
+    throw new Error("Gemini API key is not configured.");
+  }
+
+  const recentText = recentTopics.length > 0 ? recentTopics.join(', ') : "None";
+  const weakText = weakTopics.length > 0 ? weakTopics.join(', ') : "None";
+
+  const prompt = `Generate a personalized daily challenge with exactly 5 academic questions for a student in "${grade}".
+The student has recently studied these topics: "${recentText}".
+Their weak areas or topics are: "${weakText}".
+
+We need 5 questions total:
+- 3 questions from recently studied topics (to reinforce learning)
+- 1 question from weak topics (to practice what was difficult)
+- 1 new concept question suitable for their grade level (to introduce new concepts)
+
+The mix of question types MUST be exactly:
+- 3 Multiple Choice Questions (MCQs) (with exactly 4 options)
+- 1 Fill in the blank question
+- 1 Short answer question
+
+For MCQ questions, options should be clean text (e.g. ['Ans1', 'Ans2', 'Ans3', 'Ans4']) and the answer must be the exact letter 'A', 'B', 'C', or 'D' corresponding to the correct option index 0, 1, 2, or 3 respectively.
+For 'fill' and 'short' types, options must be empty/omitted and this should be the brief, correct answer string.
+
+Language style: Natural, friendly Hinglish or English as is preferred by Indian students. Use relatable terms to make the test highly engaging, like a fun Duolingo quiz.`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            questions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  type: { type: Type.STRING, description: "Must be 'mcq', 'fill', or 'short'." },
+                  question: { type: Type.STRING, description: "The quiz question. Keep it concise." },
+                  options: { 
+                    type: Type.ARRAY, 
+                    items: { type: Type.STRING },
+                    description: "For 'mcq' type, list 4 options. Empty or omit for other types."
+                  },
+                  answer: { type: Type.STRING, description: "For 'mcq', 'A', 'B', 'C', or 'D'. For others, the short answer value." },
+                  explanation: { type: Type.STRING, description: "Simple encouraging explanation." }
+                },
+                required: ["type", "question", "answer", "explanation"]
+              }
+            }
+          },
+          required: ["questions"]
+        },
+        maxOutputTokens: 2000
+      }
+    });
+
+    if (response.text) {
+      const parsed = JSON.parse(response.text);
+      if (parsed && Array.isArray(parsed.questions)) {
+        return parsed.questions as ChallengeQuestion[];
+      }
+    }
+    return [];
+  } catch (error) {
+    console.error("Error generating daily challenge:", error);
+    return [];
+  }
 }

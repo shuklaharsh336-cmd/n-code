@@ -4,14 +4,14 @@ import {
   User, MessageSquare, GraduationCap, Sparkles, Paperclip, 
   LogOut, Trash2, Shield, X, ChevronRight, 
   TrendingUp, Award, Camera, ArrowLeft, RefreshCcw,
-  Copy, Save, Clock
+  Copy, Save, Clock, Layers, Bookmark, Flame
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
-import { chatWithNCode, Message, UserData } from './services/geminiService';
+import { chatWithNCode, Message, UserData, generateFlashcardsFromResponse, generateDailyChallenge } from './services/geminiService';
 import { cn } from './lib/utils';
 import { OnboardingPage } from './components/Onboarding';
 
@@ -41,6 +41,43 @@ interface LibraryData {
   recentChats: ChatSession[];
 }
 
+export interface Flashcard {
+  id: string;
+  front: string;
+  back: string;
+  topic: string;
+  subject: string;
+  grade: string;
+  nextReview: string; // YYYY-MM-DD
+  interval: number;
+  easeFactor: number;
+  repetitions: number;
+  createdAt: string;
+}
+
+export interface ChallengeQuestion {
+  type: 'mcq' | 'fill' | 'short';
+  question: string;
+  options?: string[];
+  answer: string;
+  explanation: string;
+}
+
+export interface DailyChallenge {
+  date: string;
+  questions: ChallengeQuestion[];
+  done: boolean;
+  score?: number;
+  timeTaken?: string;
+}
+
+export interface ChallengeStreak {
+  currentStreak: number;
+  bestStreak: number;
+  lastDoneDate?: string;
+  badges: string[];
+}
+
 interface AppStats {
   topicsExplored: number;
   mcqsGenerated: number;
@@ -51,6 +88,7 @@ interface AppStats {
   weakTopics: string[];
   studiesToday: number;
   milestones: number[]; // [7, 14, 30]
+  flashcardsReviewedToday?: number;
 }
 
 // --- App ---
@@ -69,6 +107,28 @@ export default function App() {
     milestones: []
   });
   const [exams, setExams] = useState<Exam[]>([]);
+
+  // --- Spaced Repetition System states ---
+  const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
+  const [isReviewMode, setIsReviewMode] = useState(false);
+  const [currentReviewIndex, setCurrentReviewIndex] = useState(0);
+  const [showAnswer, setShowAnswer] = useState(false);
+  const [completedReviewsCount, setCompletedReviewsCount] = useState(0);
+  const [showReviewCompletedOverlay, setShowReviewCompletedOverlay] = useState(false);
+
+  // --- Daily 10-Minute Challenge states ---
+  const [challenge, setChallenge] = useState<DailyChallenge | null>(null);
+  const [challengeStreak, setChallengeStreak] = useState<ChallengeStreak>({ currentStreak: 0, bestStreak: 0, badges: [] });
+  const [challengeHistory, setChallengeHistory] = useState<Record<string, 'pass' | 'fail'>>({});
+  
+  const [isChallengeMode, setIsChallengeMode] = useState(false);
+  const [challengeCurrentIndex, setChallengeCurrentIndex] = useState(0);
+  const [challengeAnswers, setChallengeAnswers] = useState<string[]>([]);
+  const [challengeTimer, setChallengeTimer] = useState(600); // 10 minutes
+  const [challengeTimerActive, setChallengeTimerActive] = useState(false);
+  const [showChallengeCompletedOverlay, setShowChallengeCompletedOverlay] = useState(false);
+  const [challengeTimeTaken, setChallengeTimeTaken] = useState(0);
+  const [isGeneratingChallenge, setIsGeneratingChallenge] = useState(false);
 
   const [currentMode, setCurrentMode] = useState<Mode>('selection');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -136,6 +196,30 @@ export default function App() {
     const e = localStorage.getItem('ncode_exams');
     const privSeen = localStorage.getItem('nc_privacy_seen');
 
+    // Load Flashcards
+    const fc = localStorage.getItem('ncode_flashcards');
+    if (fc) {
+      setFlashcards(JSON.parse(fc));
+    }
+
+    // Load Daily Challenge
+    const chal = localStorage.getItem('ncode_daily_challenge');
+    if (chal) {
+      setChallenge(JSON.parse(chal));
+    }
+
+    // Load Challenge Streak
+    const chalStreak = localStorage.getItem('ncode_challenge_streak');
+    if (chalStreak) {
+      setChallengeStreak(JSON.parse(chalStreak));
+    }
+
+    // Load Challenge History
+    const chalHist = localStorage.getItem('ncode_challenge_history');
+    if (chalHist) {
+      setChallengeHistory(JSON.parse(chalHist));
+    }
+
     if (u) {
       setUser(JSON.parse(u));
       if (privSeen !== 'true') setShowPrivacy(true);
@@ -182,6 +266,7 @@ export default function App() {
         parsed.bestStreak = Math.max(parsed.bestStreak || 0, parsed.dayStreak);
         parsed.lastStudyDate = todayString;
         parsed.studiesToday = 0;
+        parsed.flashcardsReviewedToday = 0;
       }
       setStats(parsed);
     }
@@ -195,7 +280,13 @@ export default function App() {
     localStorage.setItem('nc_l', JSON.stringify(library));
     localStorage.setItem('nc_s', JSON.stringify(stats));
     localStorage.setItem('ncode_exams', JSON.stringify(exams));
-  }, [user, library, stats, exams]);
+    localStorage.setItem('ncode_flashcards', JSON.stringify(flashcards));
+    if (challenge) {
+      localStorage.setItem('ncode_daily_challenge', JSON.stringify(challenge));
+    }
+    localStorage.setItem('ncode_challenge_streak', JSON.stringify(challengeStreak));
+    localStorage.setItem('ncode_challenge_history', JSON.stringify(challengeHistory));
+  }, [user, library, stats, exams, flashcards, challenge, challengeStreak, challengeHistory]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -210,6 +301,209 @@ export default function App() {
 
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages, isTyping]);
 
+  // --- Feature 2: Daily Challenge helper methods & hooks ---
+  const formatTimeTaken = (sec: number): string => {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  const isAnswerCorrect = (q: ChallengeQuestion, ans: string): boolean => {
+    if (!ans) return false;
+    if (q.type === 'mcq') {
+      return ans.trim().toUpperCase() === q.answer.trim().toUpperCase();
+    }
+    return ans.trim().toLowerCase() === q.answer.trim().toLowerCase();
+  };
+
+  const completeChallenge = (score: number, elapsed: number) => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    
+    let newStreak = challengeStreak.currentStreak;
+    let newBest = challengeStreak.bestStreak;
+    
+    if (challengeStreak.lastDoneDate === yesterdayStr) {
+      newStreak += 1;
+    } else if (challengeStreak.lastDoneDate !== todayStr) {
+      newStreak = 1;
+    }
+    newBest = Math.max(newBest, newStreak);
+    
+    const badges = [...(challengeStreak.badges || [])];
+    if (newStreak >= 3 && !badges.includes("Getting Started 🌱")) badges.push("Getting Started 🌱");
+    if (newStreak >= 7 && !badges.includes("On Fire 🔥")) badges.push("On Fire 🔥");
+    if (newStreak >= 14 && !badges.includes("Dedicated Student 📚")) badges.push("Dedicated Student 📚");
+    if (newStreak >= 30 && !badges.includes("N-CODE Champion 🏆")) badges.push("N-CODE Champion 🏆");
+    
+    const updatedStreakObj: ChallengeStreak = {
+      currentStreak: newStreak,
+      bestStreak: newBest,
+      lastDoneDate: todayStr,
+      badges
+    };
+    setChallengeStreak(updatedStreakObj);
+    localStorage.setItem('ncode_challenge_streak', JSON.stringify(updatedStreakObj));
+    
+    const updatedHistory = {
+      ...challengeHistory,
+      [todayStr]: (score >= 3 ? 'pass' : 'fail') as 'pass' | 'fail'
+    };
+    setChallengeHistory(updatedHistory);
+    localStorage.setItem('ncode_challenge_history', JSON.stringify(updatedHistory));
+    
+    if (challenge) {
+      const updatedChallenge: DailyChallenge = {
+        ...challenge,
+        done: true,
+        score,
+        timeTaken: formatTimeTaken(elapsed)
+      };
+      setChallenge(updatedChallenge);
+      localStorage.setItem('ncode_daily_challenge', JSON.stringify(updatedChallenge));
+    }
+    
+    // Process wrong questions to append to weakTopics
+    if (challenge) {
+      const wrongTopicsToInject: string[] = [];
+      challenge.questions.forEach((q, idx) => {
+        const userAnswer = challengeAnswers[idx] || '';
+        const correct = isAnswerCorrect(q, userAnswer);
+        if (!correct) {
+          const summary = q.question.length > 30 ? q.question.slice(0, 30) + '...' : q.question;
+          wrongTopicsToInject.push(summary);
+        }
+      });
+      
+      if (wrongTopicsToInject.length > 0) {
+        setStats(p => {
+          const updatedWeak = Array.from(new Set([...(p.weakTopics || []), ...wrongTopicsToInject]));
+          return {
+            ...p,
+            weakTopics: updatedWeak
+          };
+        });
+      }
+    }
+  };
+
+  const submitChallengeAndShowResults = () => {
+    setChallengeTimerActive(false);
+    const elapsed = 600 - challengeTimer;
+    setChallengeTimeTaken(elapsed);
+    
+    let scoreNum = 0;
+    if (challenge) {
+      challenge.questions.forEach((q, idx) => {
+        const userAnswer = challengeAnswers[idx] || '';
+        if (isAnswerCorrect(q, userAnswer)) {
+          scoreNum++;
+        }
+      });
+    }
+    
+    completeChallenge(scoreNum, elapsed);
+    setIsChallengeMode(false);
+    setShowChallengeCompletedOverlay(true);
+  };
+
+  const getLastSevenDaysHistory = () => {
+    const dots = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dStr = d.toISOString().split('T')[0];
+      const status = challengeHistory[dStr];
+      if (status === 'pass') {
+        dots.push({ date: dStr, icon: "✅" });
+      } else if (status === 'fail') {
+        dots.push({ date: dStr, icon: "❌" });
+      } else {
+        dots.push({ date: dStr, icon: "⚪" });
+      }
+    }
+    return dots;
+  };
+
+  const getCardsDueTomorrow = () => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+    return flashcards.filter(c => c.nextReview === tomorrowStr).length;
+  };
+
+  const getRetentionRate = () => {
+    const attempted = flashcards.filter(c => c.repetitions > 0);
+    if (attempted.length === 0) return 100;
+    const highScore = attempted.filter(c => c.easeFactor >= 2.3).length;
+    return Math.round((highScore / attempted.length) * 100);
+  };
+
+  // Timer for Daily Challenge
+  useEffect(() => {
+    let intervalId: any;
+    if (isChallengeMode && challengeTimerActive && challengeTimer > 0) {
+      intervalId = setInterval(() => {
+        setChallengeTimer(t => {
+          if (t <= 1) {
+            clearInterval(intervalId);
+            setChallengeTimerActive(false);
+            submitChallengeAndShowResults();
+            return 0;
+          }
+          return t - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(intervalId);
+  }, [isChallengeMode, challengeTimerActive, challengeTimer, challenge, challengeAnswers]);
+
+  // Check and generate Daily Challenge
+  useEffect(() => {
+    const checkAndGenerateChallenge = async () => {
+      if (!user) return;
+      const todayStr = new Date().toISOString().split('T')[0];
+      const saved = localStorage.getItem('ncode_daily_challenge');
+      let needsGen = true;
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (parsed && parsed.date === todayStr) {
+            needsGen = false;
+          }
+        } catch (e) {
+          needsGen = true;
+        }
+      }
+      
+      if (needsGen && !isGeneratingChallenge) {
+        setIsGeneratingChallenge(true);
+        try {
+          const recent = library.recentChats.map(c => c.topic).slice(0, 5);
+          const weak = stats.weakTopics.slice(0, 5);
+          const questions = await generateDailyChallenge(user.gradePreference, recent, weak);
+          if (questions && questions.length === 5) {
+            const freshChallenge: DailyChallenge = {
+              date: todayStr,
+              questions,
+              done: false
+            };
+            setChallenge(freshChallenge);
+            localStorage.setItem('ncode_daily_challenge', JSON.stringify(freshChallenge));
+          }
+        } catch (err) {
+          console.error("Failed to generate challenge", err);
+        } finally {
+          setIsGeneratingChallenge(false);
+        }
+      }
+    };
+    
+    checkAndGenerateChallenge();
+  }, [user, library.recentChats, stats.weakTopics]);
+
   const saveChat = () => {
     if (messages.length === 0 || currentMode === 'selection') return;
     const firstMsg = messages.find(m => m.role === 'user')?.content || "New Chat";
@@ -222,6 +516,110 @@ export default function App() {
       timestamp: Date.now()
     };
     setLibrary(prev => ({ ...prev, recentChats: [session, ...prev.recentChats.filter(c => c.id !== session.id)].slice(0, 15) }));
+  };
+
+  const extractAndSaveFlashcards = async (responseText: string, topicName: string) => {
+    try {
+      const p = await generateFlashcardsFromResponse(responseText);
+      if (p && p.length > 0) {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(0,0,0,0);
+        const tomorrowStr = tomorrow.toISOString().split('T')[0];
+
+        const newCards: Flashcard[] = p.map(rf => ({
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          front: rf.front,
+          back: rf.back,
+          topic: topicName || "General Concepts",
+          subject: user?.subjects?.[0] || "General",
+          grade: user?.gradePreference || "All Class",
+          nextReview: tomorrowStr,
+          interval: 1,
+          easeFactor: 2.5,
+          repetitions: 0,
+          createdAt: todayStr
+        }));
+
+        setFlashcards(prev => {
+          const updated = [...prev, ...newCards];
+          localStorage.setItem('ncode_flashcards', JSON.stringify(updated));
+          return updated;
+        });
+
+        // Show toast
+        setSuccessToast(`${newCards.length} flashcards saved! Review kal hogi ✅`);
+        setTimeout(() => setSuccessToast(null), 3000);
+      }
+    } catch (err) {
+      console.error("Failed to automatically generate flashcards in background:", err);
+    }
+  };
+
+  const handleRateFlashcard = (cardId: string, rating: number) => {
+    setFlashcards(prev => {
+      const updated = prev.map(card => {
+        if (card.id !== cardId) return card;
+        
+        let interval = card.interval;
+        let easeFactor = card.easeFactor;
+        
+        if (rating === 1) {
+          interval = 1;
+        } else if (rating === 2) {
+          interval = 1;
+        } else if (rating === 3) {
+          interval = card.repetitions === 0 ? 1 : Math.max(1, interval * easeFactor);
+        } else if (rating === 4) {
+          interval = card.repetitions === 0 ? 1 : Math.max(1, interval * easeFactor * 1.3);
+        }
+        
+        easeFactor = easeFactor + (0.1 - (4 - rating) * (0.08 + (4 - rating) * 0.02));
+        if (easeFactor < 1.3) easeFactor = 1.3;
+        
+        const targetDate = new Date();
+        targetDate.setDate(targetDate.getDate() + Math.round(interval));
+        targetDate.setHours(0,0,0,0);
+        const nextReview = targetDate.toISOString().split('T')[0];
+
+        return {
+          ...card,
+          interval,
+          easeFactor,
+          repetitions: card.repetitions + 1,
+          nextReview
+        };
+      });
+      
+      localStorage.setItem('ncode_flashcards', JSON.stringify(updated));
+      return updated;
+    });
+
+    // Update stats flashcardsReviewedToday
+    setStats(p => {
+      const count = (p.flashcardsReviewedToday || 0) + 1;
+      return {
+        ...p,
+        flashcardsReviewedToday: count
+      };
+    });
+  };
+
+  const handleReviewRating = (cardId: string, rating: number) => {
+    handleRateFlashcard(cardId, rating);
+    setCompletedReviewsCount(prev => prev + 1);
+    
+    const todayStrStr = new Date().toISOString().split('T')[0];
+    const due = flashcards.filter(c => c.nextReview <= todayStrStr);
+
+    if (currentReviewIndex + 1 < due.length) {
+      setCurrentReviewIndex(prev => prev + 1);
+      setShowAnswer(false);
+    } else {
+      setShowReviewCompletedOverlay(true);
+      setIsReviewMode(false);
+    }
   };
 
   const handleSend = async (override?: string) => {
@@ -265,13 +663,16 @@ export default function App() {
       let cleanedResp = resp;
       const relatedMatch = resp.match(/RELATED:\s*(.*)/i);
       if (relatedMatch) {
-        const topics = relatedMatch[1].split(',').map(t => t.trim().replace(/[\[\]]/g, ''));
-        setSuggestions(topics.slice(0, 4));
-        cleanedResp = resp.replace(/RELATED:\s*(.*)/i, '').trim();
+         const topics = relatedMatch[1].split(',').map(t => t.trim().replace(/[\[\]]/g, ''));
+         setSuggestions(topics.slice(0, 4));
+         cleanedResp = resp.replace(/RELATED:\s*(.*)/i, '').trim();
       }
 
       const modelMsg: Message = { role: 'model', content: cleanedResp };
       setMessages(prev => [...prev, modelMsg]);
+
+      // Automatically extract and save flashcards in background
+      extractAndSaveFlashcards(cleanedResp, text);
       
       setStats(p => {
         const newStudies = p.studiesToday + 1;
@@ -475,6 +876,11 @@ export default function App() {
   };
   const daysToExam = nextExam ? getDaysLeft(nextExam.date) : null;
 
+  const todayStrStr = new Date().toISOString().split('T')[0];
+  const dueCards = flashcards.filter(c => c.nextReview <= todayStrStr);
+  const hour = new Date().getHours();
+  const isEvening = hour >= 16;
+
   return (
     <div className="flex flex-col min-h-[100dvh] bg-[#0A0A0A] text-gray-200 font-sans overflow-hidden">
       <AnimatePresence>
@@ -563,13 +969,434 @@ export default function App() {
         {showCamera && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] bg-black">
             <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
-            <canvas ref={canvasRef} className="hidden" />
             <div className="absolute inset-x-0 bottom-12 flex justify-center gap-8 items-center px-8">
               <button onClick={() => setShowCamera(false)} className="p-4 bg-white/10 rounded-full"><X /></button>
               <button onClick={capture} className="w-20 h-20 bg-white rounded-full p-2 border-4 border-white/20"><div className="w-full h-full border-2 border-black rounded-full" /></button>
             </div>
           </motion.div>
         )}
+        {confirmModal && <ConfirmDialog {...confirmModal} onCancel={() => setConfirmModal(null)} />}
+        {nudge && <Nudge text={nudge} />}
+
+        {/* Feature 1: Spaced Repetition Overlay Screen */}
+        {isReviewMode && dueCards.length > 0 && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#0A0A0A] flex flex-col">
+            <header className="h-16 border-b border-white/5 flex items-center justify-between px-4">
+              <div className="flex items-center gap-3">
+                <button onClick={() => setIsReviewMode(false)} className="p-2 -ml-2 hover:bg-white/5 rounded-full">
+                  <X className="w-5 h-5 text-gray-400" />
+                </button>
+                <div className="leading-none">
+                  <h3 className="font-black text-xs uppercase tracking-wider text-purple-400">Flashcard Review</h3>
+                  <p className="text-[9px] text-gray-500 font-bold uppercase">{currentReviewIndex + 1} of {dueCards.length} left</p>
+                </div>
+              </div>
+              <div className="text-[10px] bg-purple-500/10 text-purple-400 border border-purple-500/20 px-3 py-1.5 rounded-full font-black uppercase">
+                Sm-2 Mode
+              </div>
+            </header>
+
+            {/* Progress Bar */}
+            <div className="h-1 bg-white/5 w-full relative">
+              <div 
+                className="h-full bg-purple-500 transition-all duration-300"
+                style={{ width: `${((currentReviewIndex + (showAnswer ? 0.5 : 0)) / dueCards.length) * 100}%` }}
+              />
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-8 flex flex-col justify-between max-w-md mx-auto w-full">
+              {/* Flashcard Area */}
+              <div className="flex-1 flex items-center justify-center py-6">
+                <div 
+                  onClick={() => setShowAnswer(p => !p)}
+                  className={cn(
+                    "w-full aspect-[4/5] max-h-[350px] bg-[#121212] border border-white/5 rounded-[2.5rem] p-8 flex flex-col justify-between cursor-pointer relative shadow-2xl overflow-hidden hover:border-purple-500/30 transition-all duration-500 select-none",
+                    showAnswer ? "shadow-purple-950/10 border-purple-500/20" : ""
+                  )}
+                >
+                  <div className="absolute top-4 right-6 text-[8px] font-black tracking-widest text-[#7F77DD] py-1 px-2.5 bg-purple-600/10 rounded-full uppercase">
+                    {dueCards[currentReviewIndex].topic}
+                  </div>
+
+                  <div className="flex-1 flex flex-col justify-center items-center text-center p-2">
+                    {!showAnswer ? (
+                      <div className="space-y-4">
+                        <p className="text-[8px] font-black uppercase tracking-widest text-white/30">Question</p>
+                        <h2 className="text-sm font-black text-white leading-relaxed">{dueCards[currentReviewIndex].front}</h2>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <p className="text-[8px] font-black uppercase tracking-widest text-purple-400">Answer</p>
+                        <p className="text-xs font-medium text-gray-300 leading-relaxed">{dueCards[currentReviewIndex].back}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="text-center">
+                    <p className="text-[8px] font-black uppercase text-gray-500 tracking-widest">
+                      {showAnswer ? "Tap to Flip back" : "Tap to Flip & Answer"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Controls */}
+              <div className="space-y-4 pt-6 shrink-0">
+                {!showAnswer ? (
+                  <button 
+                    onClick={() => setShowAnswer(true)} 
+                    className="w-full py-5 bg-purple-600 hover:bg-purple-700 text-white rounded-[2rem] font-black uppercase tracking-widest text-xs shadow-lg shadow-purple-900/15"
+                  >
+                    Flip Karo 🔄
+                  </button>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-[9px] font-black uppercase text-gray-500 text-center tracking-wider mb-1">Aapko kitna yaad tha?</p>
+                    <div className="grid grid-cols-4 gap-2">
+                      <button 
+                        onClick={() => handleReviewRating(dueCards[currentReviewIndex].id, 1)} 
+                        className="py-4 bg-red-600/10 hover:bg-red-600/20 text-red-400 rounded-2xl text-[9px] font-black uppercase tracking-wider flex flex-col items-center gap-1 border border-red-500/10"
+                      >
+                        <span className="text-sm">❌</span> Forgot
+                      </button>
+                      <button 
+                        onClick={() => handleReviewRating(dueCards[currentReviewIndex].id, 2)} 
+                        className="py-4 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 rounded-2xl text-[9px] font-black uppercase tracking-wider flex flex-col items-center gap-1 border border-amber-500/10"
+                      >
+                        <span className="text-sm">🤨</span> Hard
+                      </button>
+                      <button 
+                        onClick={() => handleReviewRating(dueCards[currentReviewIndex].id, 3)} 
+                        className="py-4 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded-2xl text-[9px] font-black uppercase tracking-wider flex flex-col items-center gap-1 border border-blue-500/10"
+                      >
+                        <span className="text-sm font-semibold">👍</span> Good
+                      </button>
+                      <button 
+                        onClick={() => handleReviewRating(dueCards[currentReviewIndex].id, 4)} 
+                        className="py-4 bg-green-600/10 hover:bg-green-600/20 text-green-400 rounded-2xl text-[9px] font-black uppercase tracking-wider flex flex-col items-center gap-1 border border-green-500/10"
+                      >
+                        <span className="text-sm">🥳</span> Easy
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Feature 1: Spaced Repetition Complete Overlay */}
+        {showReviewCompletedOverlay && (
+          <div className="fixed inset-0 z-50 bg-[#0A0A0A]/95 backdrop-blur-md flex items-center justify-center p-6 text-center select-none">
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-[#121212] border border-white/5 p-8 rounded-[3rem] space-y-6 max-w-sm w-full shadow-2xl">
+              <div className="w-16 h-16 bg-purple-500/10 text-purple-400 rounded-full flex items-center justify-center mx-auto text-3xl font-bold">
+                🎉
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-2xl font-black uppercase tracking-tighter text-white">Review Complete!</h2>
+                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Shabash! Aapne saari cards review kar li hain.</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 py-2">
+                <div className="bg-white/5 p-4 rounded-2xl border border-white/5 text-center">
+                  <p className="text-[8px] font-black uppercase tracking-wider text-gray-500">Cards Done</p>
+                  <p className="text-xl font-black text-white mt-1">{completedReviewsCount}</p>
+                </div>
+                <div className="bg-white/5 p-4 rounded-2xl border border-white/5 text-center">
+                  <p className="text-[8px] font-black uppercase tracking-wider text-gray-500">Retention Rate</p>
+                  <p className="text-xl font-black text-green-400 mt-1">{getRetentionRate()}%</p>
+                </div>
+              </div>
+
+              <div className="bg-purple-500/5 border border-purple-500/10 p-4 rounded-2xl text-center">
+                <p className="text-[9px] font-black text-purple-400 uppercase tracking-widest">Agle Scheduled Cards</p>
+                <p className="text-xs text-white/70 font-bold mt-1">{getCardsDueTomorrow()} cards scheduled for tomorrow</p>
+              </div>
+
+              <button 
+                onClick={() => {
+                  setShowReviewCompletedOverlay(false);
+                  setCompletedReviewsCount(0);
+                }}
+                className="w-full py-4 bg-purple-600 hover:bg-purple-700 text-white rounded-2xl font-black uppercase tracking-widest text-[10px]"
+              >
+                Vapas Study Page Pe Jao
+              </button>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Feature 2: Daily 10-Minute Challenge Overlay */}
+        {isChallengeMode && challenge && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#0A0A0A] flex flex-col">
+            <header className="h-16 border-b border-white/5 flex items-center justify-between px-4">
+              <div className="flex items-center gap-3">
+                <button 
+                  onClick={() => {
+                    setConfirmModal({
+                      title: "Chhod Ke Jana Hai?",
+                      msg: "Agar abhi gaye to aaj ka attempt fail ho jayega.",
+                      confirmText: "Quit Karo",
+                      cancelText: "Pura Karunga",
+                      danger: true,
+                      action: () => {
+                        completeChallenge(0, 600 - challengeTimer);
+                        setIsChallengeMode(false);
+                        setConfirmModal(null);
+                      }
+                    });
+                  }} 
+                  className="p-2 -ml-2 hover:bg-white/5 rounded-full"
+                >
+                  <X className="w-5 h-5 text-gray-400" />
+                </button>
+                <div className="leading-none">
+                  <h3 className="font-black text-xs uppercase tracking-wider text-purple-400">Daily Challenge</h3>
+                  <p className="text-[9px] text-gray-500 font-bold uppercase">Question {challengeCurrentIndex + 1} of 5</p>
+                </div>
+              </div>
+              
+              <div className={cn(
+                "px-3 py-1.5 rounded-full text-xs font-black uppercase tracking-widest border flex items-center gap-2",
+                challengeTimer < 60 
+                  ? "bg-red-500/10 border-red-500/30 text-red-500 animate-pulse" 
+                  : "bg-purple-500/10 border-purple-500/20 text-purple-400"
+              )}>
+                <Clock className="w-3.5 h-3.5" />
+                {Math.floor(challengeTimer / 60)}:{(challengeTimer % 60) < 10 ? '0' : ''}{challengeTimer % 60}
+              </div>
+            </header>
+
+            {/* Question Step Indicators */}
+            <div className="grid grid-cols-5 gap-1 px-4 py-2 bg-white/5">
+              {[0, 1, 2, 3, 4].map((idx) => (
+                <div 
+                  key={`indicator-${idx}`} 
+                  className={cn(
+                    "h-1 rounded-full px-1 transition-all duration-300",
+                    idx === challengeCurrentIndex 
+                      ? "bg-purple-500" 
+                      : (challengeAnswers[idx]) 
+                        ? "bg-purple-900" 
+                        : "bg-white/10"
+                  )}
+                />
+              ))}
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-8 flex flex-col justify-between max-w-sm mx-auto w-full">
+              {/* Question card */}
+              <div className="flex-1 flex flex-col justify-center py-4">
+                <div className="bg-[#121212] border border-white/5 rounded-[2rem] p-6 space-y-6">
+                  <div className="space-y-2">
+                    <span className="text-[9px] px-2 py-1 bg-purple-500/10 text-purple-400 rounded-full uppercase font-black tracking-widest">
+                      {challenge.questions[challengeCurrentIndex].type.toUpperCase()}
+                    </span>
+                    <h2 className="text-sm font-black leading-relaxed text-white">
+                      {challenge.questions[challengeCurrentIndex].question}
+                    </h2>
+                  </div>
+
+                  {/* Render options for MCQs */}
+                  {challenge.questions[challengeCurrentIndex].type === 'mcq' && challenge.questions[challengeCurrentIndex].options && (
+                    <div className="grid grid-cols-1 gap-2">
+                      {challenge.questions[challengeCurrentIndex].options?.map((opt, oIdx) => {
+                        const optLetter = String.fromCharCode(65 + oIdx); // A, B, C, D
+                        const isSelected = challengeAnswers[challengeCurrentIndex] === optLetter;
+                        return (
+                          <button
+                            key={`option-${oIdx}`}
+                            onClick={() => {
+                              const updatedAnswers = [...challengeAnswers];
+                              updatedAnswers[challengeCurrentIndex] = optLetter;
+                              setChallengeAnswers(updatedAnswers);
+                            }}
+                            className={cn(
+                              "w-full text-left p-4 rounded-xl text-xs font-black uppercase flex items-center gap-3 transition-all border border-white/5",
+                              isSelected 
+                                ? "bg-purple-600 text-white border-purple-500 shadow-lg shadow-purple-900/10" 
+                                : "bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white"
+                            )}
+                          >
+                            <span className={cn(
+                              "w-6 h-6 rounded-lg font-black text-[10px] flex items-center justify-center border",
+                              isSelected ? "bg-white/10 border-white/20 text-white" : "bg-white/5 border-white/5 text-gray-500"
+                            )}>{optLetter}</span>
+                            {opt}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Render for Fill in blanks */}
+                  {challenge.questions[challengeCurrentIndex].type === 'fill' && (
+                    <div className="space-y-2">
+                      <p className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Apna Uttar Likho</p>
+                      <input
+                        type="text"
+                        value={challengeAnswers[challengeCurrentIndex] || ''}
+                        onChange={(e) => {
+                          const updatedAnswers = [...challengeAnswers];
+                          updatedAnswers[challengeCurrentIndex] = e.target.value;
+                          setChallengeAnswers(updatedAnswers);
+                        }}
+                        placeholder="Yahan type karo..."
+                        className="w-full bg-[#181818] border border-white/5 text-white p-4 rounded-xl text-xs font-bold outline-none focus:border-purple-500/40 focus:ring-1 focus:ring-purple-500/20"
+                      />
+                    </div>
+                  )}
+
+                  {/* Render for Short Answer */}
+                  {challenge.questions[challengeCurrentIndex].type === 'short' && (
+                    <div className="space-y-2">
+                      <p className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Apna Uttar Likho (Keywords match honge)</p>
+                      <textarea
+                        rows={3}
+                        value={challengeAnswers[challengeCurrentIndex] || ''}
+                        onChange={(e) => {
+                          const updatedAnswers = [...challengeAnswers];
+                          updatedAnswers[challengeCurrentIndex] = e.target.value;
+                          setChallengeAnswers(updatedAnswers);
+                        }}
+                        placeholder="Ek ya do shabdon mein likhein..."
+                        className="w-full bg-[#181818] border border-white/5 text-white p-4 rounded-xl text-xs font-bold outline-none focus:border-purple-500/40 focus:ring-1 focus:ring-purple-500/20 resize-none"
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Progress buttons */}
+              <div className="flex gap-3 pt-4 shrink-0">
+                {challengeCurrentIndex > 0 ? (
+                  <button
+                    onClick={() => setChallengeCurrentIndex(prev => prev - 1)}
+                    className="flex-1 py-4 bg-white/5 hover:bg-white/10 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all"
+                  >
+                    ← Peeche
+                  </button>
+                ) : <div className="flex-1" />}
+
+                {challengeCurrentIndex < 4 ? (
+                  <button
+                    disabled={!challengeAnswers[challengeCurrentIndex]}
+                    onClick={() => setChallengeCurrentIndex(prev => prev + 1)}
+                    className="flex-1 py-4 bg-purple-600 disabled:opacity-40 hover:bg-purple-700 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-md shadow-purple-950/20"
+                  >
+                    Aage Chalo →
+                  </button>
+                ) : (
+                  <button
+                    disabled={challengeAnswers.filter(Boolean).length < 5}
+                    onClick={submitChallengeAndShowResults}
+                    className="flex-1 py-4 bg-green-600 disabled:opacity-40 hover:bg-green-700 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-md shadow-green-950/20"
+                  >
+                    Submit Karo 🚀
+                  </button>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Feature 2: Daily Challenge Completed Overlay */}
+        {showChallengeCompletedOverlay && challenge && (
+          <div className="fixed inset-0 z-50 bg-[#0A0A0A]/95 backdrop-blur-md flex items-center justify-center p-6 overflow-y-auto">
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-[#121212] border border-white/5 p-6 rounded-[2.5rem] space-y-6 max-w-sm w-full shadow-2xl my-auto">
+              <div className="text-center space-y-2">
+                <div className={cn(
+                  "w-16 h-16 rounded-full flex items-center justify-center mx-auto text-3xl",
+                  (challenge.score || 0) >= 3 ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"
+                )}>
+                  {(challenge.score || 0) >= 3 ? "🏆" : "💪"}
+                </div>
+                <h2 className="text-2xl font-black uppercase tracking-tighter text-white">
+                  {(challenge.score || 0) >= 3 ? "Brilliant Score!" : "Keep Improving!"}
+                </h2>
+                <p className="text-[9px] text-gray-500 font-bold uppercase tracking-widest">
+                  {(challenge.score || 0) >= 3 ? "Aapne aaj kamaal kar diya!" : "Koi baat nahi, agli baar behter hoga!"}
+                </p>
+              </div>
+
+              {/* Stats Grid */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-white/5 p-4 rounded-xl text-center border border-white/5">
+                  <p className="text-[8px] font-black text-gray-500 uppercase">Correct Answers</p>
+                  <p className="text-lg font-black text-white mt-1">{challenge.score}/5</p>
+                </div>
+                <div className="bg-white/5 p-4 rounded-xl text-center border border-white/5">
+                  <p className="text-[8px] font-black text-gray-500 uppercase">Time taken</p>
+                  <p className="text-lg font-black text-white mt-1">{challenge.timeTaken || "0:00"}</p>
+                </div>
+                <div className="bg-white/5 p-4 rounded-xl text-center border border-white/5">
+                  <p className="text-[8px] font-black text-gray-500 uppercase">Current Streak</p>
+                  <p className="text-lg font-black text-orange-400 mt-1">{challengeStreak.currentStreak} 🔥</p>
+                </div>
+                <div className="bg-white/5 p-4 rounded-xl text-center border border-white/5">
+                  <p className="text-[8px] font-black text-gray-500 uppercase">Best Streak</p>
+                  <p className="text-lg font-black text-purple-400 mt-1">{challengeStreak.bestStreak} 🔥</p>
+                </div>
+              </div>
+
+              {/* Calendar Dots */}
+              <div className="bg-white/5 p-4 rounded-xl border border-white/5 space-y-2">
+                <p className="text-[8px] font-black text-gray-500 uppercase tracking-widest text-center">Last 7 Days History</p>
+                <div className="flex justify-center gap-2">
+                  {getLastSevenDaysHistory().map((dot, idx) => (
+                    <div key={`dot-${idx}`} className="text-lg" title={dot.date}>
+                      {dot.icon}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Badges unlocked section */}
+              {challengeStreak.badges.length > 0 && (
+                <div className="bg-purple-500/5 border border-purple-500/10 p-4 rounded-xl space-y-2 text-center">
+                  <p className="text-[8px] font-black text-purple-400 uppercase tracking-widest">Unlocked Badges 🎖️</p>
+                  <div className="flex flex-wrap justify-center gap-1.5">
+                    {challengeStreak.badges.slice(-2).map((badge, bIdx) => (
+                      <span key={`badge-${bIdx}`} className="bg-purple-600/20 text-purple-400 px-2.5 py-1 rounded-full text-[9px] font-black uppercase border border-purple-500/25">
+                        {badge}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Explanations if some questions were incorrect */}
+              {challenge.questions.some((q, idx) => !isAnswerCorrect(q, challengeAnswers[idx] || '')) && (
+                <div className="bg-white/5 p-4 rounded-xl border border-white/5 space-y-3">
+                  <p className="text-[8px] font-black text-red-400 uppercase tracking-widest">Answers Review & Explanation</p>
+                  <div className="space-y-3 max-h-[150px] overflow-y-auto pr-1">
+                    {challenge.questions.map((q, idx) => {
+                      const userAns = challengeAnswers[idx] || 'No Answer';
+                      const correct = isAnswerCorrect(q, userAns);
+                      if (correct) return null;
+                      return (
+                        <div key={`explanation-item-${idx}`} className="space-y-1 text-left border-l-2 border-red-500/50 pl-3 py-1 bg-red-500/5 rounded-r-lg">
+                          <p className="text-[9px] text-gray-400 font-black">Q{idx + 1}: {q.question}</p>
+                          <p className="text-[9px] text-red-400">Aapka jawab: <strong>{userAns}</strong></p>
+                          <p className="text-[9px] text-green-400">Sahi jawab: <strong>{q.answer}</strong></p>
+                          <p className="text-[9px] text-gray-500 leading-normal italic">{q.explanation}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <button 
+                onClick={() => setShowChallengeCompletedOverlay(false)}
+                className="w-full py-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-black uppercase tracking-widest text-[10px]"
+              >
+                Vapas Study Page Pe Jao
+              </button>
+            </motion.div>
+          </div>
+        )}
+
         {confirmModal && <ConfirmDialog {...confirmModal} onCancel={() => setConfirmModal(null)} />}
         {nudge && <Nudge text={nudge} />}
       </AnimatePresence>
@@ -617,6 +1444,107 @@ export default function App() {
                     <ChevronRight className="w-5 h-5 text-white/20 group-hover:translate-x-1 transition-transform" />
                   </motion.div>
                 )}
+                {currentMode === 'selection' && (
+                  <div className="flex flex-col gap-4">
+                    {/* Feature 2: Daily Challenge Banner */}
+                    {challenge && (!challenge.done ? (
+                      <div className={cn(
+                        "p-6 rounded-[2rem] border flex items-center justify-between group cursor-pointer transition-all hover:scale-[1.01] active:scale-95 shadow-lg border-white/5",
+                        isEvening 
+                          ? "bg-gradient-to-r from-red-950/20 via-[#1A1115] to-[#121212] border-red-500/20" 
+                          : "bg-gradient-to-r from-purple-950/20 via-[#13111A] to-[#121212] border-purple-500/10"
+                      )}
+                      onClick={() => {
+                        setChallengeCurrentIndex(0);
+                        setChallengeAnswers(Array(challenge.questions?.length || 5).fill(''));
+                        setChallengeTimer(600);
+                        setChallengeTimerActive(true);
+                        setIsChallengeMode(true);
+                      }}
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className={cn(
+                            "w-11 h-11 rounded-xl flex items-center justify-center font-bold text-lg shrink-0 shadow-inner",
+                            isEvening ? "bg-red-500/10 text-red-400" : "bg-purple-500/10 text-purple-400"
+                          )}>
+                            ⚡
+                          </div>
+                          <div>
+                            <p className={cn(
+                              "text-[8px] font-black uppercase tracking-widest leading-none",
+                              isEvening ? "text-red-400" : "text-purple-400"
+                            )}>
+                              {isEvening ? "⏰ Din kharab na karo, challenge pura karo!" : "Aaj Ka Challenge Ready!"}
+                            </p>
+                            <h3 className="text-xs font-black uppercase text-white leading-tight mt-1">5 questions • 10 minutes</h3>
+                            <p className="text-[9px] text-gray-400 font-bold uppercase mt-1 leading-none">Your Streak: {challengeStreak.currentStreak || 0} 🔥</p>
+                          </div>
+                        </div>
+                        <button className={cn(
+                          "px-4 py-2.5 rounded-full text-[9px] font-black uppercase tracking-widest transition-all shadow-md shrink-0 active:scale-95",
+                          isEvening ? "bg-red-600 hover:bg-red-700 text-white" : "bg-purple-600 hover:bg-purple-700 text-white"
+                        )}>
+                          Chalo Shuru Karein →
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="bg-[#121212] border border-white/5 p-6 rounded-[2rem] flex items-center justify-between shadow-lg">
+                        <div className="flex items-center gap-4">
+                          <div className="w-11 h-11 bg-green-500/10 text-green-400 rounded-xl flex items-center justify-center font-bold text-lg shrink-0">
+                            ✓
+                          </div>
+                          <div>
+                            <p className="text-[8px] font-black uppercase text-green-400 tracking-widest leading-none">Aaj Ka Challenge Completed!</p>
+                            <h3 className="text-xs font-black uppercase text-white/50 leading-tight mt-1">Sahi Jawab: {challenge.score}/5 Done ✨</h3>
+                            <p className="text-[9px] text-gray-500 font-bold uppercase mt-1 leading-none">Streak: {challengeStreak.currentStreak || 0} 🔥</p>
+                          </div>
+                        </div>
+                        <div className="px-3 py-1.5 bg-green-500/10 border border-green-500/20 text-green-400 rounded-full text-[9px] font-black uppercase tracking-widest shrink-0">
+                          {challenge.score}/5 Correct
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Feature 1: Spaced Repetition System Banner */}
+                    {dueCards.length > 0 ? (
+                      <div 
+                        onClick={() => {
+                          setCurrentReviewIndex(0);
+                          setShowAnswer(false);
+                          setCompletedReviewsCount(0);
+                          setIsReviewMode(true);
+                        }}
+                        className="cursor-pointer bg-gradient-to-r from-purple-950/20 via-[#13111A] to-[#121212] border border-purple-500/10 p-6 rounded-[2rem] flex items-center justify-between shadow-lg hover:scale-[1.01] active:scale-95 transition-all"
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className="w-11 h-11 bg-purple-500/10 text-purple-400 rounded-xl flex items-center justify-center font-bold text-lg shrink-0">
+                            📚
+                          </div>
+                          <div>
+                            <p className="text-[8px] font-black uppercase text-purple-400 tracking-widest leading-none">Spaced Repetition Flashcards</p>
+                            <h3 className="text-xs font-black uppercase text-white leading-tight mt-1">Aaj Ka Revision Ready</h3>
+                            <p className="text-[9px] text-gray-400 font-bold uppercase mt-1 leading-none">{dueCards.length} Cards pending to review</p>
+                          </div>
+                        </div>
+                        <button className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-full text-[9px] font-black uppercase tracking-widest shrink-0 shadow-md">
+                          Review Karo →
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="bg-[#121212] border border-white/5 p-6 rounded-[2rem] flex items-center gap-4 shadow-lg">
+                        <div className="w-11 h-11 bg-white/5 text-gray-400 rounded-xl flex items-center justify-center font-bold text-lg shrink-0">
+                          ✨
+                        </div>
+                        <div>
+                          <p className="text-[8px] font-black uppercase text-gray-500 tracking-widest leading-none">Spaced Repetition System</p>
+                          <h4 className="text-xs font-black uppercase text-gray-400 mt-1 leading-tight">Koi reviews pending nahi hai!</h4>
+                          <p className="text-[9px] text-gray-500 font-medium leading-none mt-1">Padhai chalu rakho, N-CODE flashcards banata rahega.</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {currentMode === 'selection' ? (
                   <ModeGrid onSelect={handleModeSelect} streak={stats.dayStreak} />
                 ) : (
@@ -894,6 +1822,10 @@ export default function App() {
                   <StatBox label="MCQs Answered" val={stats.mcqsGenerated} icon={Award} />
                   <StatBox label="Best Streak" val={stats.bestStreak} icon={TrendingUp} />
                   <StatBox label="Notes Saved" val={library.savedNotes.length} icon={Save} />
+                  <StatBox label="Total Flashcards" val={flashcards.length} icon={Layers} />
+                  <StatBox label="Reviewed Today" val={stats.flashcardsReviewedToday || 0} icon={Bookmark} />
+                  <StatBox label="Challenge Streak" val={challengeStreak.currentStreak} icon={Flame} />
+                  <StatBox label="Challenge Best" val={challengeStreak.bestStreak} icon={TrendingUp} />
                 </div>
               </div>
 
