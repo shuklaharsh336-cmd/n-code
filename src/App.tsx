@@ -170,6 +170,15 @@ export default function App() {
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
   };
 
+  const handleCameraCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setAttachedImage(reader.result as string);
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -298,6 +307,10 @@ export default function App() {
     }, 60000);
     return () => clearInterval(timer);
   }, [currentMode, isTyping, lastActivity, user]);
+
+  useEffect(() => {
+    saveChat();
+  }, [activeTab]);
 
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages, isTyping]);
 
@@ -507,8 +520,12 @@ export default function App() {
   const saveChat = () => {
     if (messages.length === 0 || currentMode === 'selection') return;
     const firstMsg = messages.find(m => m.role === 'user')?.content || "New Chat";
+    const chatId = activeChatId || `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    if (!activeChatId) {
+      setActiveChatId(chatId);
+    }
     const session: ChatSession = {
-      id: activeChatId || `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      id: chatId,
       mode: currentMode as any,
       topic: firstMsg.slice(0, 40) + (firstMsg.length > 40 ? '...' : ''),
       messages: messages,
@@ -703,22 +720,29 @@ export default function App() {
       return;
     }
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return alert("Browser voice support nahi hai.");
-    
-    recognitionRef.current = new SpeechRecognition();
-    recognitionRef.current.lang = 'hi-IN'; // Supports Hindi/English/Hinglish to some extent
-    recognitionRef.current.continuous = false;
-    
-    recognitionRef.current.onstart = () => setIsRecording(true);
-    recognitionRef.current.onresult = (e: any) => {
-      const transcript = e.results[0][0].transcript;
-      setInput(prev => prev + ' ' + transcript);
-      setIsRecording(false);
+    if (!SpeechRecognition) {
+      setErrorToast("Chrome use karo voice ke liye");
+      setTimeout(() => setErrorToast(null), 3000);
+      return;
+    }
+    const r = new SpeechRecognition();
+    r.lang = 'hi-IN';
+    r.continuous = false;
+    r.interimResults = true;
+    r.onresult = (e: any) => {
+      const t = Array.from(e.results)
+        .map((res: any) => res[0].transcript).join('');
+      setInput(t);
     };
-    recognitionRef.current.onerror = () => setIsRecording(false);
-    recognitionRef.current.onend = () => setIsRecording(false);
-    
-    recognitionRef.current.start();
+    r.onend = () => setIsRecording(false);
+    r.onerror = () => {
+      setIsRecording(false);
+      setErrorToast("Voice nahi suni, dobara try karo");
+      setTimeout(() => setErrorToast(null), 3000);
+    };
+    r.start();
+    setIsRecording(true);
+    recognitionRef.current = r;
   };
 
   const speak = (text: string, index: number) => {
@@ -728,11 +752,19 @@ export default function App() {
       return;
     }
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text.replace(/[*#]/g, ''));
-    utterance.rate = 0.9;
-    utterance.onstart = () => setIsSpeaking(index);
-    utterance.onend = () => setIsSpeaking(null);
-    window.speechSynthesis.speak(utterance);
+    const clean = text
+      .replace(/<[^>]*>/g, '')
+      .replace(/[*#`_]/g, '')
+      .replace(/\s+/g, ' ').trim();
+    const u = new SpeechSynthesisUtterance(clean);
+    u.rate = 0.9;
+    u.lang = 'hi-IN';
+    const voices = window.speechSynthesis.getVoices();
+    const hindi = voices.find(v => v.lang.includes('hi'));
+    if (hindi) u.voice = hindi;
+    u.onstart = () => setIsSpeaking(index);
+    u.onend = () => setIsSpeaking(null);
+    window.speechSynthesis.speak(u);
   };
 
   const startCamera = async () => {
@@ -752,81 +784,73 @@ export default function App() {
       const filename = `N-CODE_${mode === 'quick_revision' ? 'Flashcard' : 'Notes'}_${topicName.replace(/\s+/g, '_')}_${dateStr}.pdf`;
 
       const doc = new jsPDF('p', 'mm', 'a4');
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const margin = 20;
-      const contentWidth = pageWidth - (margin * 2);
-
-      // Create a hidden div to render the content for html2canvas
-      const element = document.createElement('div');
-      element.style.width = `${contentWidth}mm`;
-      element.style.padding = '20px';
-      element.style.background = 'white';
-      element.style.color = 'black';
-      element.style.fontFamily = 'Arial, sans-serif';
-      element.className = 'markdown-body pdf-export';
+      const date = new Date().toLocaleDateString();
       
-      // Inject Styles for PDF
-      const style = document.createElement('style');
-      style.innerHTML = `
-        .pdf-export { font-size: 12px; line-height: 1.6; }
-        .pdf-export h3, .pdf-export h4 { color: #7F77DD; margin-top: 15px; margin-bottom: 5px; font-size: 16px; text-transform: uppercase; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-        .pdf-export p { margin-bottom: 10px; }
-        .pdf-export ul, .pdf-export ol { padding-left: 20px; margin-bottom: 10px; }
-        .pdf-export li { margin-bottom: 5px; }
-        .pdf-export strong { font-weight: bold; }
-        .pdf-export .remember-box { background: #f3f0ff; border-left: 4px solid #7F77DD; padding: 15px; border-radius: 8px; margin: 15px 0; }
-        .pdf-export .remember-box h4 { color: #7F77DD; margin-top: 0; font-size: 14px; border: none; }
-        .pdf-header { border-bottom: 2px solid #7F77DD; padding-bottom: 10px; margin-bottom: 20px; }
-        .pdf-footer { border-top: 1px solid #eee; margin-top: 30px; padding-top: 10px; text-align: center; font-size: 10px; color: #666; }
-      `;
-      document.head.appendChild(style);
+      doc.setFontSize(20);
+      doc.setTextColor(127, 119, 221);
+      doc.text('N-CODE — Smart Study Notes', 20, 20);
+      
+      doc.setFontSize(10);
+      doc.setTextColor(100, 100, 100);
+      doc.text(`Student: ${user?.name || "Student"}`, 20, 32);
+      doc.text(`Grade: ${user?.gradePreference || "All Class"}`, 100, 32);
+      doc.text(`Date: ${date}`, 20, 38);
+      doc.text(`Topic: ${topicName}`, 20, 44);
+      
+      doc.setDrawColor(127, 119, 221);
+      doc.line(20, 48, 190, 48);
+      
+      const cleanText = content
+        .replace(/<[^>]*>/g, '')
+        .replace(/[*#`]/g, '')
+        .trim();
+      
+      doc.setFontSize(11);
+      doc.setTextColor(0, 0, 0);
+      const lines = doc.splitTextToSize(cleanText, 170);
+      
+      let cursorY = 58;
+      const pageHeight = doc.internal.pageSize.getHeight();
+      
+      for (let i = 0; i < lines.length; i++) {
+        if (cursorY > pageHeight - 25) {
+          doc.setFontSize(8);
+          doc.setTextColor(150, 150, 150);
+          doc.text('Generated by N-CODE | Padhai ka Smart Saathi', 20, pageHeight - 10);
+          doc.addPage();
+          cursorY = 20;
+          doc.setFontSize(11);
+          doc.setTextColor(0, 0, 0);
+        }
+        doc.text(lines[i], 20, cursorY);
+        cursorY += 6;
+      }
+      
+      doc.setFontSize(8);
+      doc.setTextColor(150, 150, 150);
+      doc.text(
+        'Generated by N-CODE | Padhai ka Smart Saathi', 
+        20, pageHeight - 10
+      );
+      
+      doc.save(filename);
+      setSuccessToast("PDF ready hai! ✅");
+      setTimeout(() => setSuccessToast(null), 2000);
 
-      const headerHtml = `
-        <div class="pdf-header">
-          <h2 style="color: #7F77DD; margin: 0; font-size: 24px;">N-CODE — Smart Study Notes</h2>
-          <div style="display: flex; justify-content: space-between; font-size: 10px; margin-top: 5px;">
-            <span>Student: <strong>${user?.name}</strong></span>
-            <span>Grade: <strong>${user?.gradePreference}</strong></span>
-            <span>Date: <strong>${new Date().toLocaleDateString()}</strong></span>
-          </div>
-          <p style="margin-top: 10px; font-size: 14px;">Topic: <strong>${topicName}</strong></p>
-        </div>
-      `;
+      // Save to library
+      const newNote = {
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        topic: topicName,
+        content: content,
+        date: date,
+        type: mode === 'quick_revision' ? 'FLASHCARD' : 'NOTES'
+      };
 
-      const footerHtml = `
-        <div class="pdf-footer">
-          Generated by N-CODE | Padhai ka Smart Saathi
-        </div>
-      `;
-
-      const sanitizedHtml = DOMPurify.sanitize(marked.parse(content) as string);
-      element.innerHTML = headerHtml + sanitizedHtml + footerHtml;
-      document.body.appendChild(element);
-
-      await doc.html(element, {
-        callback: function (doc) {
-          doc.save(filename);
-          document.body.removeChild(element);
-          document.head.removeChild(style);
-          setSuccessToast("PDF ready hai! ✅");
-          setTimeout(() => setSuccessToast(null), 2000);
-          
-          // Also save to library
-          setLibrary(p => ({
-            ...p,
-            savedNotes: [{ 
-              id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`, 
-              topic: topicName, 
-              content: content, 
-              date: new Date().toLocaleDateString(), 
-              type: mode.toUpperCase() + " (PDF)" 
-            }, ...p.savedNotes]
-          }));
-        },
-        x: 0,
-        y: 0,
-        width: pageWidth,
-        windowWidth: 800 // Use a fixed window width for consistency
+      setLibrary(prev => {
+        const updatedNotes = [newNote, ...prev.savedNotes];
+        const updatedLib = { ...prev, savedNotes: updatedNotes };
+        localStorage.setItem('nc_l', JSON.stringify(updatedLib));
+        return updatedLib;
       });
     } catch (e) {
       console.error(e);
@@ -885,17 +909,17 @@ export default function App() {
     <div className="flex flex-col min-h-[100dvh] bg-[#0A0A0A] text-gray-200 font-sans overflow-hidden">
       <AnimatePresence>
         {!isOnline && (
-          <motion.div initial={{ y: -50 }} animate={{ y: 0 }} exit={{ y: -50 }} className="fixed top-0 inset-x-0 h-6 bg-red-500 text-white text-[10px] font-black uppercase flex items-center justify-center z-[110]">
+          <motion.div key="offline-toast" initial={{ y: -50 }} animate={{ y: 0 }} exit={{ y: -50 }} className="fixed top-0 inset-x-0 h-6 bg-red-500 text-white text-[10px] font-black uppercase flex items-center justify-center z-[110]">
             Offline Mode — Showing saved content
           </motion.div>
         )}
         {showOnlineStatus && (
-          <motion.div initial={{ y: -50 }} animate={{ y: 0 }} exit={{ y: -50 }} className="fixed top-0 inset-x-0 h-6 bg-green-500 text-white text-[10px] font-black uppercase flex items-center justify-center z-[110]">
+          <motion.div key="online-toast" initial={{ y: -50 }} animate={{ y: 0 }} exit={{ y: -50 }} className="fixed top-0 inset-x-0 h-6 bg-green-500 text-white text-[10px] font-black uppercase flex items-center justify-center z-[110]">
             Back online ✅
           </motion.div>
         )}
         {celebrate && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] pointer-events-none flex items-center justify-center bg-purple-600/20 backdrop-blur-sm">
+          <motion.div key="celebrate-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] pointer-events-none flex items-center justify-center bg-purple-600/20 backdrop-blur-sm">
             <div className="text-center space-y-4">
               <h1 className="text-6xl animate-bounce">🔥</h1>
               <h2 className="text-4xl font-black uppercase tracking-tighter">Day Champion!</h2>
@@ -906,6 +930,7 @@ export default function App() {
         )}
         {milestoneReached && (
           <ConfirmDialog 
+            key="milestone-dialog"
             title="Milestone Reached! 🏆" 
             msg={`Badhai ho! Aapne ${milestoneReached} dino ka streak complete kiya hai! Keep it up.`} 
             onConfirm={() => setMilestoneReached(null)} 
@@ -913,7 +938,7 @@ export default function App() {
           />
         )}
         {showPrivacy && (
-          <div className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-md flex items-center justify-center p-6 text-center">
+          <div key="privacy-overlay" className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-md flex items-center justify-center p-6 text-center">
             <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-[#121212] border border-white/10 p-8 rounded-[3rem] space-y-6 max-w-sm">
               <Shield className="w-16 h-16 text-green-500 mx-auto" />
               <h2 className="text-3xl font-black uppercase tracking-tighter">Your Data is Safe</h2>
@@ -928,17 +953,18 @@ export default function App() {
           </div>
         )}
         {errorToast && (
-          <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[100] bg-red-600 text-white px-6 py-3 rounded-full font-black uppercase text-[10px] tracking-widest shadow-2xl">
+          <motion.div key="error-toast" initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[100] bg-red-600 text-white px-6 py-3 rounded-full font-black uppercase text-[10px] tracking-widest shadow-2xl">
             {errorToast}
           </motion.div>
         )}
         {successToast && (
-          <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[100] bg-green-600 text-white px-6 py-3 rounded-full font-black uppercase text-[10px] tracking-widest shadow-2xl flex items-center gap-2">
+          <motion.div key="success-toast" initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[100] bg-green-600 text-white px-6 py-3 rounded-full font-black uppercase text-[10px] tracking-widest shadow-2xl flex items-center gap-2">
             {successToast}
           </motion.div>
         )}
         {showAddExam && (
           <AddExamModal 
+            key="add-exam-modal"
             onClose={() => setShowAddExam(false)} 
             onSave={(exam: Exam) => {
               if (exams.length >= 10) {
@@ -956,31 +982,23 @@ export default function App() {
         )}
         {showEditProfile && (
           <EditProfileModal 
+            key="edit-profile-modal"
             user={user} 
             onClose={() => setShowEditProfile(false)} 
             onSave={(updated) => {
               setUser(updated);
+              localStorage.setItem('ncode_profile', JSON.stringify(updated));
+              localStorage.setItem('nc_u', JSON.stringify(updated));
               setShowEditProfile(false);
               setSuccessToast("Profile update ho gaya! ✅");
-              setTimeout(() => setSuccessToast(null), 2000);
+              setTimeout(() => setSuccessToast(null), 3000);
             }} 
           />
         )}
-        {showCamera && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] bg-black">
-            <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
-            <div className="absolute inset-x-0 bottom-12 flex justify-center gap-8 items-center px-8">
-              <button onClick={() => setShowCamera(false)} className="p-4 bg-white/10 rounded-full"><X /></button>
-              <button onClick={capture} className="w-20 h-20 bg-white rounded-full p-2 border-4 border-white/20"><div className="w-full h-full border-2 border-black rounded-full" /></button>
-            </div>
-          </motion.div>
-        )}
-        {confirmModal && <ConfirmDialog {...confirmModal} onCancel={() => setConfirmModal(null)} />}
-        {nudge && <Nudge text={nudge} />}
 
         {/* Feature 1: Spaced Repetition Overlay Screen */}
         {isReviewMode && dueCards.length > 0 && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#0A0A0A] flex flex-col">
+          <motion.div key="review-mode-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#0A0A0A] flex flex-col">
             <header className="h-16 border-b border-white/5 flex items-center justify-between px-4">
               <div className="flex items-center gap-3">
                 <button onClick={() => setIsReviewMode(false)} className="p-2 -ml-2 hover:bg-white/5 rounded-full">
@@ -1087,7 +1105,7 @@ export default function App() {
 
         {/* Feature 1: Spaced Repetition Complete Overlay */}
         {showReviewCompletedOverlay && (
-          <div className="fixed inset-0 z-50 bg-[#0A0A0A]/95 backdrop-blur-md flex items-center justify-center p-6 text-center select-none">
+          <div key="review-completed-overlay" className="fixed inset-0 z-50 bg-[#0A0A0A]/95 backdrop-blur-md flex items-center justify-center p-6 text-center select-none">
             <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-[#121212] border border-white/5 p-8 rounded-[3rem] space-y-6 max-w-sm w-full shadow-2xl">
               <div className="w-16 h-16 bg-purple-500/10 text-purple-400 rounded-full flex items-center justify-center mx-auto text-3xl font-bold">
                 🎉
@@ -1128,7 +1146,7 @@ export default function App() {
 
         {/* Feature 2: Daily 10-Minute Challenge Overlay */}
         {isChallengeMode && challenge && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#0A0A0A] flex flex-col">
+          <motion.div key="challenge-mode-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#0A0A0A] flex flex-col">
             <header className="h-16 border-b border-white/5 flex items-center justify-between px-4">
               <div className="flex items-center gap-3">
                 <button 
@@ -1302,7 +1320,7 @@ export default function App() {
 
         {/* Feature 2: Daily Challenge Completed Overlay */}
         {showChallengeCompletedOverlay && challenge && (
-          <div className="fixed inset-0 z-50 bg-[#0A0A0A]/95 backdrop-blur-md flex items-center justify-center p-6 overflow-y-auto">
+          <div key="challenge-completed-overlay" className="fixed inset-0 z-50 bg-[#0A0A0A]/95 backdrop-blur-md flex items-center justify-center p-6 overflow-y-auto">
             <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-[#121212] border border-white/5 p-6 rounded-[2.5rem] space-y-6 max-w-sm w-full shadow-2xl my-auto">
               <div className="text-center space-y-2">
                 <div className={cn(
@@ -1387,18 +1405,30 @@ export default function App() {
                 </div>
               )}
 
-              <button 
-                onClick={() => setShowChallengeCompletedOverlay(false)}
-                className="w-full py-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-black uppercase tracking-widest text-[10px]"
-              >
-                Vapas Study Page Pe Jao
-              </button>
+              <div className="space-y-2">
+                <button 
+                  onClick={() => {
+                    const score = challenge.score || 0;
+                    const text = `N-CODE Daily Challenge mein maine ${score}/5 score kiya! 🔥 Streak is ${challengeStreak.currentStreak} Days. Can you beat my score? Join N-CODE! 🚀`;
+                    window.open(`whatsapp://send?text=${encodeURIComponent(text)}`);
+                  }}
+                  className="w-full py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-black uppercase tracking-widest text-[10px] flex items-center justify-center gap-2"
+                >
+                  WhatsApp pe Share Karo 🚀
+                </button>
+                <button 
+                  onClick={() => setShowChallengeCompletedOverlay(false)}
+                  className="w-full py-4 bg-white/5 border border-white/10 hover:bg-white/10 text-white rounded-xl font-black uppercase tracking-widest text-[10px]"
+                >
+                  Vapas Study Page Pe Jao
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
 
-        {confirmModal && <ConfirmDialog {...confirmModal} onCancel={() => setConfirmModal(null)} />}
-        {nudge && <Nudge text={nudge} />}
+        {confirmModal && <ConfirmDialog key="confirm-modal" {...confirmModal} onCancel={() => setConfirmModal(null)} />}
+        {nudge && <Nudge key="nudge" text={nudge} />}
       </AnimatePresence>
 
       <header className="h-16 border-b border-white/5 flex items-center justify-between px-4 bg-[#0A0A0A]/80 backdrop-blur-xl sticky top-0 z-40">
@@ -1593,9 +1623,9 @@ export default function App() {
                 {library.recentChats.length === 0 && <p className="text-xs text-white/10 uppercase font-black ml-4">No recent chats</p>}
                 <div className="space-y-4">
                   <AnimatePresence>
-                    {library.recentChats.map(c => (
+                    {library.recentChats.map((c, idx) => (
                       <motion.div 
-                        key={c.id} 
+                        key={c.id ? `chat-${c.id}-${idx}` : `chat-idx-${idx}`} 
                         layout
                         initial={{ opacity: 1 }}
                         exit={{ opacity: 0, x: -20 }}
@@ -1651,9 +1681,9 @@ export default function App() {
                 {library.savedNotes.length === 0 && <p className="text-xs text-white/10 uppercase font-black ml-4">No saved items</p>}
                 <div className="space-y-4">
                   <AnimatePresence>
-                    {library.savedNotes.map(n => (
+                    {library.savedNotes.map((n, idx) => (
                       <motion.div 
-                        key={n.id} 
+                        key={n.id ? `note-${n.id}-${idx}` : `note-idx-${idx}`} 
                         layout
                         initial={{ opacity: 1 }}
                         exit={{ opacity: 0, scale: 0.95 }}
@@ -1729,9 +1759,9 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-4">
-                    {exams.map(ex => (
+                    {exams.map((ex, idx) => (
                       <ExamCountdownCard 
-                        key={ex.id} 
+                        key={ex.id ? `exam-${ex.id}-${idx}` : `exam-idx-${idx}`} 
                         ex={ex} 
                         onDelete={() => {
                           setConfirmModal({
@@ -1893,7 +1923,17 @@ export default function App() {
                 {isRecording ? <motion.div animate={{ scale: [1, 1.2, 1] }} transition={{ repeat: Infinity, duration: 1 }} className="w-3 h-3 bg-red-500 rounded-full shadow-[0_0_15px_rgba(239,68,68,0.5)]" /> : <MessageSquare className="w-5 h-5"/>}
               </div>
             </button>
-            <button type="button" onClick={startCamera} className="p-4 text-gray-400"><Camera className="w-5 h-5"/></button>
+            <button type="button" onClick={() => document.getElementById('camera-capture-input')?.click()} className="p-4 text-gray-400">
+              <Camera className="w-5 h-5"/>
+              <input 
+                id="camera-capture-input" 
+                type="file" 
+                accept="image/*" 
+                capture="environment" 
+                className="hidden" 
+                onChange={handleCameraCapture} 
+              />
+            </button>
             <button type="button" onClick={() => document.getElementById('fl')?.click()} className="p-4 text-gray-400"><Paperclip className="w-5 h-5"/><input id="fl" type="file" className="hidden" accept="image/*" onChange={e => { const f = e.target.files?.[0]; if(f){ const r=new FileReader(); r.onload=()=>setAttachedImage(r.result as string); r.readAsDataURL(f); }}} /></button>
             <input value={input} onChange={e => setInput(e.target.value)} placeholder={getPlaceholder(currentMode)} className="flex-1 bg-transparent py-4 text-sm outline-none px-2 font-bold focus:text-white" />
             <button type="submit" disabled={(!input.trim() && !attachedImage) || isTyping} className={cn("w-12 h-12 rounded-full flex items-center justify-center transition-all", input || attachedImage ? "bg-white text-black" : "bg-white/5 text-white/20")}><Send className="w-5 h-5"/></button>
@@ -1967,33 +2007,71 @@ function ModeGrid({ onSelect, streak }: any) {
 }
 
 function MsgBubble({ m, index, isSpeaking, onSpeak, onSave, mode, onWrongAnswer, onDownloadPDF }: { m: Message, index: number, isSpeaking: boolean, onSpeak: () => void, onSave: () => void, mode: Mode, onWrongAnswer: (t: string) => void, onDownloadPDF: (content: string, mode: Mode) => void }) {
-  const [selectedOption, setSelectedOption] = useState<string | null>(null);
-  const [showExplanation, setShowExplanation] = useState(false);
+  const [selectedOptions, setSelectedOptions] = useState<Record<number, string>>({});
+  const [showExplanations, setShowExplanations] = useState<Record<number, boolean>>({});
   const isUser = m.role === 'user';
   
-  // MCQ Parsing: Look for Q1, Q2 etc and options (A) (B) (C) (D)
-  const mcqs = mode === 'mcq' && !isUser ? m.content.split(/Q\d\./).filter(q => q.includes('(A)')).map(q => {
-    const lines = q.split('\n');
-    const question = lines[0].trim();
-    const options: Record<string, string> = {};
-    ['A', 'B', 'C', 'D'].forEach(o => {
-      const line = lines.find(l => l.includes(`(${o})`));
-      if (line) options[o] = line.split(`(${o})`)[1].trim();
+  const parseMCQ = (text: string) => {
+    const questions: any[] = [];
+    const qBlocks = text.split(/Q\d+\.?/i);
+    qBlocks.forEach(block => {
+      if (!block.trim()) return;
+      const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length < 3) return;
+      
+      const question = lines[0];
+      const optionsList = lines.filter(l => /^[A-D](\)|\.|\s)/i.test(l) || /^\([A-D]\)/i.test(l));
+      
+      const answerLine = lines.find(l => l.toLowerCase().startsWith('answer:'));
+      const answer = answerLine ? answerLine.split(':')[1]?.trim().toUpperCase().charAt(0) : null;
+      
+      const expLine = lines.find(l => l.toLowerCase().startsWith('explanation:'));
+      const explanation = expLine ? expLine.split(':')[1]?.trim() : null;
+      
+      if (question && optionsList.length === 4) {
+        const optionsDict: Record<string, string> = {};
+        optionsList.forEach(opt => {
+          const cleanOpt = opt.replace(/^[A-D](\)|\.|\s)\s*/i, '').replace(/^\([A-D]\)\s*/i, '').trim();
+          const match = opt.match(/^([A-D])/i) || opt.match(/^\(([A-D])\)/i);
+          if (match) {
+            const letter = match[1].toUpperCase();
+            optionsDict[letter] = cleanOpt;
+          }
+        });
+        if (Object.keys(optionsDict).length === 4) {
+          questions.push({ question, options: optionsDict, answer, explanation });
+        }
+      }
     });
-    const answerMatch = q.match(/Answer:\s*([A-D])/i);
-    const answer = answerMatch ? answerMatch[1].toUpperCase() : null;
-    const explanationMatch = q.match(/Explanation:\s*(.*)/i);
-    const explanation = explanationMatch ? explanationMatch[1].trim() : null;
-    return { question, options, answer, explanation };
-  }) : [];
+    return questions;
+  };
 
-  const handleMCQ = (opt: string, correctOpt: string | null, questionText: string) => {
-    if (selectedOption) return;
-    setSelectedOption(opt);
-    setShowExplanation(true);
+  const mcqs = mode === 'mcq' && !isUser ? parseMCQ(m.content) : [];
+
+  const handleMCQ = (qIdx: number, opt: string, correctOpt: string | null, questionText: string) => {
+    if (selectedOptions[qIdx]) return;
+    setSelectedOptions(prev => ({ ...prev, [qIdx]: opt }));
+    setShowExplanations(prev => ({ ...prev, [qIdx]: true }));
     if (correctOpt && opt !== correctOpt) {
       onWrongAnswer(questionText);
     }
+  };
+
+  const getCleanedContent = () => {
+    if (mode === 'mcq' && !isUser) {
+      return m.content
+        .split('\n')
+        .filter(line => {
+          const trimmed = line.trim();
+          if (/^[A-D](\)|\.)/i.test(trimmed) || /^\([A-D]\)/i.test(trimmed)) return false;
+          if (trimmed.toLowerCase().startsWith('answer:')) return false;
+          if (trimmed.toLowerCase().startsWith('explanation:')) return false;
+          if (trimmed.toLowerCase().startsWith('topic:')) return false;
+          return true;
+        })
+        .join('\n');
+    }
+    return m.content;
   };
 
   const copyToClipboard = () => {
@@ -2020,7 +2098,7 @@ function MsgBubble({ m, index, isSpeaking, onSpeak, onSave, mode, onWrongAnswer,
           {isUser ? (
             <p>{m.content}</p>
           ) : (
-            <SecureHTML content={m.content} />
+            <SecureHTML content={getCleanedContent()} />
           )}
           
           {mode === 'quick_revision' && !isUser && (
@@ -2049,21 +2127,21 @@ function MsgBubble({ m, index, isSpeaking, onSpeak, onSave, mode, onWrongAnswer,
                     {Object.entries(q.options).map(([key, val]) => (
                       <button 
                         key={key} 
-                        disabled={!!selectedOption}
-                        onClick={() => handleMCQ(key, q.answer, q.question)}
+                        disabled={!!selectedOptions[qIdx]}
+                        onClick={() => handleMCQ(qIdx, key, q.answer, q.question)}
                         className={cn(
                           "p-4 rounded-2xl text-left text-xs font-bold transition-all border flex items-center gap-3",
-                          selectedOption === key 
+                          selectedOptions[qIdx] === key 
                             ? (key === q.answer ? "bg-green-500/20 border-green-500 text-green-500" : "bg-red-500/20 border-red-500 text-red-500")
-                            : (selectedOption && key === q.answer ? "bg-green-500/20 border-green-500 text-green-500" : "bg-white/5 border-white/10 text-gray-400 hover:bg-white/10")
+                            : (selectedOptions[qIdx] && key === q.answer ? "bg-green-500/20 border-green-500 text-green-500" : "bg-white/5 border-white/10 text-gray-400 hover:bg-white/10")
                         )}
                       >
                         <span className="w-6 h-6 rounded-lg bg-white/10 flex items-center justify-center shrink-0">{key}</span>
-                        {val}
+                        {val as string}
                       </button>
                     ))}
                   </div>
-                  {showExplanation && q.explanation && (
+                  {showExplanations[qIdx] && q.explanation && (
                     <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} className="pt-4 border-t border-white/5 space-y-2">
                       <p className="text-[10px] font-black uppercase text-white/40">Explanation</p>
                       <p className="text-xs italic text-gray-400 font-medium">{q.explanation}</p>
