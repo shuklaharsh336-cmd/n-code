@@ -27,8 +27,8 @@ export interface ChallengeQuestion {
 }
 
 export const GEMINI_CONFIG = {
-  model: "gemini-2.0-flash",
-  fallbackModel: "gemini-1.5-flash",
+  model: "gemini-3.5-flash",
+  fallbackModel: "gemini-3.5-flash",
   apiVersion: "v1beta",
   maxRetries: 3,
   timeout: 30000
