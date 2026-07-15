@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ChevronRight, LogIn } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { UserData } from '../services/geminiService';
 
 const SLIDES = [

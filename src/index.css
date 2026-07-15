@@ -1,7 +1,10 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&family=JetBrains+Mono:wght@400;500&display=swap');
-@import "tailwindcss";
 
-@theme {
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Plus Jakarta Sans", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
@@ -92,3 +95,153 @@
   background: #474747;
   border-radius: 10px;
 }
+
+/* ==========================================================================
+   PAPER LIGHT THEME SYSTEM (PRODUCTION-READY & MAINTENANCE-FREE)
+   ========================================================================== */
+
+.theme-paper {
+  background-color: #FAF9F6 !important;
+  color: #1C1917 !important;
+  color-scheme: light;
+}
+
+/* Background Overrides */
+.theme-paper .bg-\[\#0A0A0A\] {
+  background-color: #FAF9F6 !important;
+}
+
+.theme-paper .bg-\[\#121212\] {
+  background-color: #FFFFFF !important;
+}
+
+.theme-paper .bg-\[\#1a1a1a\] {
+  background-color: #F3F1EC !important;
+}
+
+.theme-paper .bg-[#0A0A0A]\/80 {
+  background-color: rgba(250, 249, 246, 0.8) !important;
+}
+
+.theme-paper .bg-white\/5 {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+.theme-paper .bg-white\/10 {
+  background-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.theme-paper .bg-white\/20 {
+  background-color: rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Hover Overrides */
+.theme-paper .hover\:bg-white\/5:hover {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+.theme-paper .hover\:bg-white\/10:hover {
+  background-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+/* Border Overrides */
+.theme-paper .border-white\/5 {
+  border-color: rgba(0, 0, 0, 0.06) !important;
+}
+
+.theme-paper .border-white\/10 {
+  border-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+.theme-paper .border-white\/20 {
+  border-color: rgba(0, 0, 0, 0.18) !important;
+}
+
+/* Text Color Overrides */
+.theme-paper .text-white {
+  color: #0A0A0A !important;
+}
+
+.theme-paper .text-gray-200 {
+  color: #1C1917 !important;
+}
+
+.theme-paper .text-gray-300 {
+  color: #292524 !important;
+}
+
+.theme-paper .text-gray-400 {
+  color: #57534E !important;
+}
+
+.theme-paper .text-gray-500 {
+  color: #78716C !important;
+}
+
+.theme-paper .text-gray-600 {
+  color: #A8A29E !important;
+}
+
+/* Opacity Text Overrides */
+.theme-paper .text-white\/10 {
+  color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.theme-paper .text-white\/20 {
+  color: rgba(0, 0, 0, 0.15) !important;
+}
+
+.theme-paper .text-white\/30 {
+  color: rgba(0, 0, 0, 0.25) !important;
+}
+
+.theme-paper .text-white\/40 {
+  color: rgba(0, 0, 0, 0.35) !important;
+}
+
+.theme-paper .text-white\/50 {
+  color: rgba(0, 0, 0, 0.45) !important;
+}
+
+.theme-paper .text-white\/60 {
+  color: rgba(0, 0, 0, 0.55) !important;
+}
+
+.theme-paper .text-white\/70 {
+  color: rgba(0, 0, 0, 0.65) !important;
+}
+
+.theme-paper .text-white\/80 {
+  color: rgba(0, 0, 0, 0.75) !important;
+}
+
+/* Markdown Text Safety */
+.theme-paper .markdown-body strong {
+  color: #0A0A0A !important;
+}
+
+.theme-paper .markdown-body code {
+  background: #EAE8E3 !important;
+  color: #1E1B4B !important;
+}
+
+.theme-paper .markdown-body p,
+.theme-paper .markdown-body li {
+  color: #37352F !important; /* Elegant paper content color */
+}
+
+/* Remember Box Light Theme overrides */
+.theme-paper .remember-box {
+  background: #F1EFF7 !important;
+  border-left-color: #7F77DD !important;
+}
+
+.theme-paper .remember-box li {
+  color: #1C1917 !important;
+}
+
+/* Custom Scrollbar for Light Theme */
+.theme-paper .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #C7C6C6 !important;
+}
+

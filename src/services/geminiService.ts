@@ -26,6 +26,122 @@ export interface ChallengeQuestion {
   explanation: string;
 }
 
+export const GEMINI_CONFIG = {
+  model: "gemini-2.0-flash",
+  fallbackModel: "gemini-1.5-flash",
+  apiVersion: "v1beta",
+  maxRetries: 3,
+  timeout: 30000
+};
+
+export const callGemini = async (prompt: string, imageData?: string, options?: { contents?: any[], responseMimeType?: string, responseSchema?: any }) => {
+  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
+  
+  if (!API_KEY) {
+    throw new Error("API_KEY_MISSING");
+  }
+
+  let modelToUse = GEMINI_CONFIG.model;
+
+  // Retry logic - try 3 times before failing
+  for (let attempt = 1; attempt <= GEMINI_CONFIG.maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(), 
+        GEMINI_CONFIG.timeout
+      );
+
+      const parts: any[] = [];
+      if (imageData) {
+        parts.push({
+          inline_data: {
+            mime_type: "image/jpeg",
+            data: imageData.includes(',') ? imageData.split(',')[1] : imageData
+          }
+        });
+      }
+      parts.push({ text: prompt });
+
+      const contents = options?.contents || [{ parts }];
+
+      const bodyPayload: any = {
+        contents,
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 2048,
+          topP: 0.8,
+          topK: 40
+        },
+        safetySettings: [
+          {
+            category: "HARM_CATEGORY_HARASSMENT",
+            threshold: "BLOCK_NONE"
+          },
+          {
+            category: "HARM_CATEGORY_HATE_SPEECH", 
+            threshold: "BLOCK_NONE"
+          }
+        ]
+      };
+
+      if (options?.responseMimeType) {
+        bodyPayload.generationConfig.responseMimeType = options.responseMimeType;
+      }
+      if (options?.responseSchema) {
+        bodyPayload.generationConfig.responseSchema = options.responseSchema;
+      }
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/${GEMINI_CONFIG.apiVersion}/models/${modelToUse}:generateContent?key=${API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify(bodyPayload)
+        }
+      );
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        if (response.status === 429) {
+          // Rate limited - wait and retry
+          await new Promise(r => setTimeout(r, 2000 * attempt));
+          continue;
+        }
+        
+        // Switch to fallback on other error
+        if (modelToUse === GEMINI_CONFIG.model && GEMINI_CONFIG.fallbackModel) {
+          modelToUse = GEMINI_CONFIG.fallbackModel;
+        }
+        
+        throw new Error(`API_ERROR_${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
+        throw new Error("EMPTY_RESPONSE");
+      }
+
+      return data.candidates[0].content.parts[0].text;
+
+    } catch (error: any) {
+      if (modelToUse === GEMINI_CONFIG.model && GEMINI_CONFIG.fallbackModel) {
+        modelToUse = GEMINI_CONFIG.fallbackModel;
+      }
+      
+      if (attempt === GEMINI_CONFIG.maxRetries) {
+        throw error;
+      }
+      // Wait before retry
+      await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+  }
+  throw new Error("EMPTY_RESPONSE");
+};
+
 function getModePrefix(mode: string, user?: UserData): string {
   const name = user?.name || "Student";
   const grade = user?.gradePreference || "All Class";
@@ -94,12 +210,6 @@ export async function chatWithNCode(
   userContext?: UserData,
   imageBase64?: string
 ): Promise<string> {
-  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-  if (!API_KEY) {
-    console.error("Gemini API key is not configured");
-    throw new Error("API key missing");
-  }
-
   const prefix = getModePrefix(mode, userContext);
   
   let finalPromptText = "";
@@ -144,86 +254,37 @@ These should be related topics the student should study next. Do not use square 
     });
   }
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: contentsList,
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 2048
-        }
-      })
-    }
-  );
-  
-  const data = await response.json();
-  if (data.error) {
-    console.error("Gemini API Error:", data.error);
-    throw new Error(data.error.message || "API call failed");
-  }
-  
-  if (!data.candidates || data.candidates.length === 0) {
-    throw new Error("Empty response");
-  }
-
-  return data.candidates[0].content.parts[0].text;
+  return callGemini(finalPromptText, imageBase64, { contents: contentsList });
 }
 
 export async function generateFlashcardsFromResponse(aiResponse: string): Promise<RawFlashcard[]> {
-  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-  if (!API_KEY) {
-    throw new Error("Gemini API key is not configured.");
-  }
-
   const prompt = `Extract 3-5 key concepts from this text as flashcards.
 Return ONLY valid JSON array, nothing else:
 [{"front":"question","back":"answer"}]
 Text: ${aiResponse}`;
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 2048,
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "ARRAY",
-              items: {
-                type: "OBJECT",
-                properties: {
-                  front: { type: "STRING" },
-                  back: { type: "STRING" }
-                },
-                required: ["front", "back"]
-              }
-            }
-          }
-        })
+    const text = await callGemini(prompt, undefined, {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "ARRAY",
+        items: {
+          type: "OBJECT",
+          properties: {
+            front: { type: "STRING" },
+            back: { type: "STRING" }
+          },
+          required: ["front", "back"]
+        }
       }
-    );
+    });
 
-    const data = await response.json();
-    if (data.error) {
-      console.error("Flashcard generation error:", data.error);
-      return [];
-    }
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (text) {
       const cleanJson = text.replace(/```json/g, "").replace(/```/g, "").trim();
       let parsed;
       try {
         parsed = JSON.parse(cleanJson);
       } catch (e) {
-        // Recovery attempt: escape literal newlines in string values
         try {
           const recovered = cleanJson.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"/g, (match, p1) => {
             return '"' + p1.replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"';
@@ -251,11 +312,6 @@ export async function generateDailyChallenge(
   weakTopics: string[],
   language: string = "Hinglish"
 ): Promise<ChallengeQuestion[]> {
-  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-  if (!API_KEY) {
-    throw new Error("Gemini API key is not configured.");
-  }
-
   const prompt = `Generate exactly 5 MCQ questions for 
    ${grade} student in ${language}.
    Recent topics: ${recentTopics.join(', ')}.
@@ -274,50 +330,32 @@ export async function generateDailyChallenge(
    }`;
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 2048,
-            responseMimeType: "application/json",
-            responseSchema: {
+    const text = await callGemini(prompt, undefined, {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          questions: {
+            type: "ARRAY",
+            items: {
               type: "OBJECT",
               properties: {
-                questions: {
+                question: { type: "STRING" },
+                options: {
                   type: "ARRAY",
-                  items: {
-                    type: "OBJECT",
-                    properties: {
-                      question: { type: "STRING" },
-                      options: {
-                        type: "ARRAY",
-                        items: { type: "STRING" }
-                      },
-                      answer: { type: "STRING" },
-                      explanation: { type: "STRING" }
-                    },
-                    required: ["question", "options", "answer", "explanation"]
-                  }
-                }
+                  items: { type: "STRING" }
+                },
+                answer: { type: "STRING" },
+                explanation: { type: "STRING" }
               },
-              required: ["questions"]
+              required: ["question", "options", "answer", "explanation"]
             }
           }
-        })
+        },
+        required: ["questions"]
       }
-    );
+    });
 
-    const data = await response.json();
-    if (data.error) {
-      console.error("Daily Challenge generation error:", data.error);
-      return [];
-    }
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (text) {
       const cleanJson = text.replace(/```json/g, "").replace(/```/g, "").trim();
       let parsed;

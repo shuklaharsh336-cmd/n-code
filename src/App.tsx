@@ -1,12 +1,12 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, Suspense, lazy } from 'react';
 import { 
   Send, BookOpen, FileText, HelpCircle, Calculator, Zap, 
   User, MessageSquare, GraduationCap, Sparkles, Paperclip, 
   LogOut, Trash2, Shield, X, ChevronRight, 
   TrendingUp, Award, Camera, ArrowLeft, RefreshCcw,
-  Copy, Save, Clock, Layers, Bookmark, Flame
+  Copy, Save, Clock, Layers, Bookmark, Flame, Sun, Moon
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { jsPDF } from 'jspdf';
@@ -91,9 +91,171 @@ interface AppStats {
   flashcardsReviewedToday?: number;
 }
 
+// --- Lazy Load Overlay Components ---
+const FlashcardReview = lazy(() => import('./components/FlashcardReview'));
+const DailyChallenge = lazy(() => import('./components/DailyChallenge'));
+
+// --- Future-proofing Safety & Storage Wrappers ---
+const APP_VERSION = "1.0.0";
+const STORAGE_KEYS = {
+  profile: 'ncode_profile',
+  user: 'nc_u',
+  library: 'nc_l',
+  stats: 'nc_s',
+  exams: 'ncode_exams',
+  flashcards: 'ncode_flashcards',
+  challenge: 'ncode_daily_challenge',
+  streak: 'ncode_challenge_streak',
+  privacy: 'nc_privacy_seen',
+  version: 'ncode_version',
+  history: 'ncode_challenge_history',
+  cache: 'ncode_cache',
+  chats: 'savedChats',
+  theme: 'ncode_theme'
+};
+
+const safeGet = (key: string, fallback: any = null) => {
+  try {
+    const item = localStorage.getItem(key);
+    if (!item) return fallback;
+    return JSON.parse(item);
+  } catch {
+    return fallback;
+  }
+};
+
+const safeSet = (key: string, value: any): boolean => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (e: any) {
+    if (e.name === 'QuotaExceededError') {
+      try {
+        const library = safeGet(STORAGE_KEYS.library, {});
+        if (library.recentChats?.length > 5) {
+          library.recentChats = library.recentChats.slice(0, 5);
+          localStorage.setItem(STORAGE_KEYS.library, JSON.stringify(library));
+          localStorage.setItem(key, JSON.stringify(value));
+          return true;
+        }
+      } catch {}
+    }
+    console.error('Storage error:', e);
+    return false;
+  }
+};
+
+const migrateData = () => {
+  const currentVersion = safeGet(STORAGE_KEYS.version, '0.0.0');
+  if (currentVersion === APP_VERSION) return;
+
+  const oldUser = localStorage.getItem('nc_u');
+  if (oldUser && !localStorage.getItem('ncode_profile')) {
+    localStorage.setItem('ncode_profile', oldUser);
+  }
+
+  const profile = safeGet(STORAGE_KEYS.profile);
+  if (profile) {
+    const updated = {
+      name: profile.name || 'Student',
+      email: profile.email || '',
+      gradePreference: profile.gradePreference || profile.grade || 'Class 10',
+      language: profile.language || 'Hinglish',
+      subjects: profile.subjects || [],
+      avatarColor: profile.avatarColor || '#7F77DD',
+      ...profile
+    };
+    safeSet(STORAGE_KEYS.profile, updated);
+  }
+
+  const stats = safeGet(STORAGE_KEYS.stats);
+  if (stats) {
+    const updated = {
+      topicsExplored: 0,
+      mcqsGenerated: 0,
+      notesSaved: 0,
+      dayStreak: 1,
+      bestStreak: 1,
+      weakTopics: [],
+      studiesToday: 0,
+      milestones: [],
+      lastStudyDate: null,
+      ...stats
+    };
+    safeSet(STORAGE_KEYS.stats, updated);
+  }
+
+  const library = safeGet(STORAGE_KEYS.library);
+  if (library) {
+    const updated = {
+      recentChats: [],
+      savedNotes: [],
+      ...library
+    };
+    safeSet(STORAGE_KEYS.library, updated);
+  }
+
+  safeSet(STORAGE_KEYS.version, APP_VERSION);
+};
+
+const healthCheck = (): boolean => {
+  try {
+    migrateData();
+    localStorage.setItem('ncode_health', 'ok');
+    localStorage.removeItem('ncode_health');
+    return true;
+  } catch (err) {
+    console.error('Health check failed:', err);
+    return false;
+  }
+};
+
+const getErrorMessage = (error: any): string => {
+  const msg = error?.message || '';
+  if (msg.includes('API_KEY_MISSING')) return "App setup incomplete hai. Admin se contact karo.";
+  if (msg.includes('API_ERROR_429')) return "Thoda busy hoon abhi, 1 minute baad try karo 🔄";
+  if (msg.includes('API_ERROR_403')) return "API key expired ho gayi. Admin se contact karo.";
+  if (msg.includes('API_ERROR_500')) return "Google ka server down hai, thodi der baad try karo 🔄";
+  if (msg.includes('EMPTY_RESPONSE')) return "Kuch mila nahi, thoda aur detail mein poochho 🤔";
+  if (msg.includes('AbortError') || msg.includes('timeout')) return "Internet slow hai, dobara try karo 🔄";
+  if (!navigator.onLine) return "Internet nahi hai, offline notes dekho 📚";
+  return "Kuch gadbad hui, dobara try karo 🔄";
+};
+
+const sanitizeInput = (text: string): string => {
+  return text
+    .trim()
+    .slice(0, 2000)
+    .replace(/<script[^>]*>.*?<\/script>/gi, '')
+    .replace(/javascript:/gi, '');
+};
+
+const cacheResponse = (key: string, response: string) => {
+  const cache = safeGet(STORAGE_KEYS.cache, {});
+  cache[key] = { response, timestamp: Date.now() };
+  const keys = Object.keys(cache);
+  if (keys.length > 50) {
+    delete cache[keys[0]];
+  }
+  safeSet(STORAGE_KEYS.cache, cache);
+};
+
+const getCachedResponse = (key: string): string | null => {
+  const cache = safeGet(STORAGE_KEYS.cache, {});
+  return cache[key]?.response || null;
+};
+
 // --- App ---
 export default function App() {
   const [user, setUser] = useState<UserData | null>(null);
+  const [theme, setTheme] = useState<'deep-space' | 'paper'>(() => safeGet(STORAGE_KEYS.theme, 'deep-space'));
+
+  const toggleTheme = () => {
+    const nextTheme = theme === 'deep-space' ? 'paper' : 'deep-space';
+    setTheme(nextTheme);
+    safeSet(STORAGE_KEYS.theme, nextTheme);
+  };
+
   const [activeTab, setActiveTab] = useState<Tab>('study');
   const [library, setLibrary] = useState<LibraryData>({ savedNotes: [], recentChats: [] });
   const [stats, setStats] = useState<AppStats>({ 
@@ -199,56 +361,61 @@ export default function App() {
   const dailyFocus = SUGGESTIONS[new Date().getDate() % SUGGESTIONS.length];
 
   useEffect(() => {
-    const u = localStorage.getItem('ncode_profile') || localStorage.getItem('nc_u');
-    const l = localStorage.getItem('nc_l');
-    const s = localStorage.getItem('nc_s');
-    const e = localStorage.getItem('ncode_exams');
-    const privSeen = localStorage.getItem('nc_privacy_seen');
+    // Part 10 & Part 5: Health check and migration on startup
+    const ok = healthCheck();
+    if (!ok) {
+      console.error("Storage/Startup health check failed!");
+    }
+
+    const u = safeGet(STORAGE_KEYS.profile) || safeGet(STORAGE_KEYS.user);
+    const l = safeGet(STORAGE_KEYS.library);
+    const s = safeGet(STORAGE_KEYS.stats);
+    const e = safeGet(STORAGE_KEYS.exams);
+    const privSeen = safeGet(STORAGE_KEYS.privacy);
 
     // Load Flashcards
-    const fc = localStorage.getItem('ncode_flashcards');
+    const fc = safeGet(STORAGE_KEYS.flashcards);
     if (fc) {
-      setFlashcards(JSON.parse(fc));
+      setFlashcards(fc);
     }
 
     // Load Daily Challenge
-    const chal = localStorage.getItem('ncode_daily_challenge');
+    const chal = safeGet(STORAGE_KEYS.challenge);
     if (chal) {
-      setChallenge(JSON.parse(chal));
+      setChallenge(chal);
     }
 
     // Load Challenge Streak
-    const chalStreak = localStorage.getItem('ncode_challenge_streak');
+    const chalStreak = safeGet(STORAGE_KEYS.streak);
     if (chalStreak) {
-      setChallengeStreak(JSON.parse(chalStreak));
+      setChallengeStreak(chalStreak);
     }
 
     // Load Challenge History
-    const chalHist = localStorage.getItem('ncode_challenge_history');
+    const chalHist = safeGet(STORAGE_KEYS.history);
     if (chalHist) {
-      setChallengeHistory(JSON.parse(chalHist));
+      setChallengeHistory(chalHist);
     }
 
     if (u) {
-      setUser(JSON.parse(u));
+      setUser(u);
       if (privSeen !== 'true') setShowPrivacy(true);
     }
-    if (l) setLibrary(JSON.parse(l));
+    if (l) setLibrary(l);
     
     // Exam cleanup and sorting
     if (e) {
-      const parsedExams: Exam[] = JSON.parse(e);
       const today = new Date();
       today.setHours(0,0,0,0);
-      const filtered = parsedExams
-        .filter(ex => new Date(ex.date) >= today)
-        .sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      const filtered = e
+        .filter((ex: Exam) => new Date(ex.date) >= today)
+        .sort((a: Exam, b: Exam) => new Date(a.date).getTime() - new Date(b.date).getTime());
       setExams(filtered);
-      localStorage.setItem('ncode_exams', JSON.stringify(filtered));
+      safeSet(STORAGE_KEYS.exams, filtered);
     }
 
     if (s) {
-      const parsed = JSON.parse(s);
+      const parsed = s;
       
       // Streak Logic
       const now = new Date();
@@ -283,18 +450,26 @@ export default function App() {
 
   useEffect(() => {
     if (user) {
-      localStorage.setItem('ncode_profile', JSON.stringify(user));
-      localStorage.setItem('nc_u', JSON.stringify(user));
+      safeSet(STORAGE_KEYS.profile, user);
+      safeSet(STORAGE_KEYS.user, user);
     }
-    localStorage.setItem('nc_l', JSON.stringify(library));
-    localStorage.setItem('nc_s', JSON.stringify(stats));
-    localStorage.setItem('ncode_exams', JSON.stringify(exams));
-    localStorage.setItem('ncode_flashcards', JSON.stringify(flashcards));
+    const truncatedLibrary = {
+      ...library,
+      recentChats: library.recentChats ? library.recentChats.slice(0, 15) : [],
+      savedNotes: library.savedNotes ? library.savedNotes.slice(0, 50) : []
+    };
+    safeSet(STORAGE_KEYS.library, truncatedLibrary);
+    safeSet(STORAGE_KEYS.stats, stats);
+    safeSet(STORAGE_KEYS.exams, exams);
+    
+    const truncatedFlashcards = flashcards ? flashcards.slice(-100) : [];
+    safeSet(STORAGE_KEYS.flashcards, truncatedFlashcards);
+    
     if (challenge) {
-      localStorage.setItem('ncode_daily_challenge', JSON.stringify(challenge));
+      safeSet(STORAGE_KEYS.challenge, challenge);
     }
-    localStorage.setItem('ncode_challenge_streak', JSON.stringify(challengeStreak));
-    localStorage.setItem('ncode_challenge_history', JSON.stringify(challengeHistory));
+    safeSet(STORAGE_KEYS.streak, challengeStreak);
+    safeSet(STORAGE_KEYS.history, challengeHistory);
   }, [user, library, stats, exams, flashcards, challenge, challengeStreak, challengeHistory]);
 
   useEffect(() => {
@@ -358,14 +533,14 @@ export default function App() {
       badges
     };
     setChallengeStreak(updatedStreakObj);
-    localStorage.setItem('ncode_challenge_streak', JSON.stringify(updatedStreakObj));
+    safeSet(STORAGE_KEYS.streak, updatedStreakObj);
     
     const updatedHistory = {
       ...challengeHistory,
       [todayStr]: (score >= 3 ? 'pass' : 'fail') as 'pass' | 'fail'
     };
     setChallengeHistory(updatedHistory);
-    localStorage.setItem('ncode_challenge_history', JSON.stringify(updatedHistory));
+    safeSet(STORAGE_KEYS.history, updatedHistory);
     
     if (challenge) {
       const updatedChallenge: DailyChallenge = {
@@ -375,7 +550,7 @@ export default function App() {
         timeTaken: formatTimeTaken(elapsed)
       };
       setChallenge(updatedChallenge);
-      localStorage.setItem('ncode_daily_challenge', JSON.stringify(updatedChallenge));
+      safeSet(STORAGE_KEYS.challenge, updatedChallenge);
     }
     
     // Process wrong questions to append to weakTopics
@@ -478,16 +653,11 @@ export default function App() {
     const checkAndGenerateChallenge = async () => {
       if (!user) return;
       const todayStr = new Date().toISOString().split('T')[0];
-      const saved = localStorage.getItem('ncode_daily_challenge');
+      const saved = safeGet(STORAGE_KEYS.challenge);
       let needsGen = true;
       if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (parsed && parsed.date === todayStr) {
-            needsGen = false;
-          }
-        } catch (e) {
-          needsGen = true;
+        if (saved.date === todayStr) {
+          needsGen = false;
         }
       }
       
@@ -504,7 +674,7 @@ export default function App() {
               done: false
             };
             setChallenge(freshChallenge);
-            localStorage.setItem('ncode_daily_challenge', JSON.stringify(freshChallenge));
+            safeSet(STORAGE_KEYS.challenge, freshChallenge);
           }
         } catch (err) {
           console.error("Failed to generate challenge", err);
@@ -560,8 +730,8 @@ export default function App() {
         }));
 
         setFlashcards(prev => {
-          const updated = [...prev, ...newCards];
-          localStorage.setItem('ncode_flashcards', JSON.stringify(updated));
+          const updated = [...prev, ...newCards].slice(-100);
+          safeSet(STORAGE_KEYS.flashcards, updated);
           return updated;
         });
 
@@ -609,8 +779,9 @@ export default function App() {
         };
       });
       
-      localStorage.setItem('ncode_flashcards', JSON.stringify(updated));
-      return updated;
+      const truncated = updated.slice(-100);
+      safeSet(STORAGE_KEYS.flashcards, truncated);
+      return truncated;
     });
 
     // Update stats flashcardsReviewedToday
@@ -640,7 +811,7 @@ export default function App() {
   };
 
   const handleSend = async (override?: string) => {
-    const text = (override || input).trim();
+    const text = sanitizeInput(override || input);
     if ((!text && !attachedImage) || isTyping) return;
     
     // Check image size if attached (mock check for base64 length)
@@ -662,7 +833,24 @@ export default function App() {
     setAttachedImage(null);
 
     try {
-      if (!isOnline) throw new Error("Offline");
+      if (!isOnline) {
+        const cached = getCachedResponse(text);
+        if (cached) {
+          let cleanedResp = cached;
+          const relatedMatch = cached.match(/RELATED:\s*(.*)/i);
+          if (relatedMatch) {
+             const topics = relatedMatch[1].split(',').map(t => t.trim().replace(/[\[\]]/g, ''));
+             setSuggestions(topics.slice(0, 4));
+             cleanedResp = cached.replace(/RELATED:\s*(.*)/i, '').trim();
+          }
+
+          const modelMsg: Message = { role: 'model', content: cleanedResp + "\n\n*(Cached response — offline mode)*" };
+          setMessages(prev => [...prev, modelMsg]);
+          setIsTyping(false);
+          return;
+        }
+        throw new Error("Offline");
+      }
 
       // Filter out auto-greeting from history sent to API
       const apiHistory = messages.filter((msg, idx) => {
@@ -673,7 +861,12 @@ export default function App() {
       const resp = await chatWithNCode(apiHistory, text, currentMode, user!, img || undefined);
       
       if (!resp || resp.includes("I'm sorry, I couldn't generate a response")) {
-        throw new Error("Empty response");
+        throw new Error("EMPTY_RESPONSE");
+      }
+
+      // Cache online response
+      if (text) {
+        cacheResponse(text, resp);
       }
 
       // Parse RELATED topics
@@ -703,10 +896,7 @@ export default function App() {
       });
     } catch (e: any) {
       console.error(e);
-      let errorMsg = "Kuch gadbad hui, dobara try karo 🔄";
-      if (!isOnline) errorMsg = "Offline ho? Saved notes check karo!";
-      if (e.message === "Empty response") errorMsg = "Kuch mila nahi, thoda aur detail mein poochho";
-      
+      const errorMsg = getErrorMessage(e);
       setMessages(prev => [...prev, { role: 'model', content: errorMsg }]);
     } finally {
       setIsTyping(false);
@@ -847,9 +1037,9 @@ export default function App() {
       };
 
       setLibrary(prev => {
-        const updatedNotes = [newNote, ...prev.savedNotes];
+        const updatedNotes = [newNote, ...prev.savedNotes].slice(0, 50);
         const updatedLib = { ...prev, savedNotes: updatedNotes };
-        localStorage.setItem('nc_l', JSON.stringify(updatedLib));
+        safeSet(STORAGE_KEYS.library, updatedLib);
         return updatedLib;
       });
     } catch (e) {
@@ -906,7 +1096,10 @@ export default function App() {
   const isEvening = hour >= 16;
 
   return (
-    <div className="flex flex-col min-h-[100dvh] bg-[#0A0A0A] text-gray-200 font-sans overflow-hidden">
+    <div className={cn(
+      "flex flex-col min-h-[100dvh] font-sans overflow-hidden transition-colors duration-300",
+      theme === 'paper' ? "theme-paper bg-[#FAF9F6] text-gray-800" : "theme-deep-space bg-[#0A0A0A] text-gray-200"
+    )}>
       <AnimatePresence>
         {!isOnline && (
           <motion.div key="offline-toast" initial={{ y: -50 }} animate={{ y: 0 }} exit={{ y: -50 }} className="fixed top-0 inset-x-0 h-6 bg-red-500 text-white text-[10px] font-black uppercase flex items-center justify-center z-[110]">
@@ -944,7 +1137,7 @@ export default function App() {
               <h2 className="text-3xl font-black uppercase tracking-tighter">Your Data is Safe</h2>
               <p className="text-sm text-gray-500 leading-relaxed font-medium">N-CODE aapki privacy ka dhyan rakhta hai. Aapka saari progress aur history sirf aapke local device mein store hoti hai.</p>
               <button 
-                onClick={() => { localStorage.setItem('nc_privacy_seen', 'true'); setShowPrivacy(false); }} 
+                onClick={() => { safeSet(STORAGE_KEYS.privacy, 'true'); setShowPrivacy(false); }} 
                 className="w-full py-5 bg-white text-black rounded-3xl font-black uppercase tracking-widest text-xs"
               >
                 I Understand & Start
@@ -986,9 +1179,14 @@ export default function App() {
             user={user} 
             onClose={() => setShowEditProfile(false)} 
             onSave={(updated) => {
-              setUser(updated);
-              localStorage.setItem('ncode_profile', JSON.stringify(updated));
-              localStorage.setItem('nc_u', JSON.stringify(updated));
+              const sanitizedUser = {
+                ...updated,
+                name: sanitizeInput(updated.name),
+                subjects: updated.subjects.map(s => sanitizeInput(s))
+              };
+              setUser(sanitizedUser);
+              safeSet(STORAGE_KEYS.profile, sanitizedUser);
+              safeSet(STORAGE_KEYS.user, sanitizedUser);
               setShowEditProfile(false);
               setSuccessToast("Profile update ho gaya! ✅");
               setTimeout(() => setSuccessToast(null), 3000);
@@ -998,109 +1196,17 @@ export default function App() {
 
         {/* Feature 1: Spaced Repetition Overlay Screen */}
         {isReviewMode && dueCards.length > 0 && (
-          <motion.div key="review-mode-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#0A0A0A] flex flex-col">
-            <header className="h-16 border-b border-white/5 flex items-center justify-between px-4">
-              <div className="flex items-center gap-3">
-                <button onClick={() => setIsReviewMode(false)} className="p-2 -ml-2 hover:bg-white/5 rounded-full">
-                  <X className="w-5 h-5 text-gray-400" />
-                </button>
-                <div className="leading-none">
-                  <h3 className="font-black text-xs uppercase tracking-wider text-purple-400">Flashcard Review</h3>
-                  <p className="text-[9px] text-gray-500 font-bold uppercase">{currentReviewIndex + 1} of {dueCards.length} left</p>
-                </div>
-              </div>
-              <div className="text-[10px] bg-purple-500/10 text-purple-400 border border-purple-500/20 px-3 py-1.5 rounded-full font-black uppercase">
-                Sm-2 Mode
-              </div>
-            </header>
-
-            {/* Progress Bar */}
-            <div className="h-1 bg-white/5 w-full relative">
-              <div 
-                className="h-full bg-purple-500 transition-all duration-300"
-                style={{ width: `${((currentReviewIndex + (showAnswer ? 0.5 : 0)) / dueCards.length) * 100}%` }}
-              />
-            </div>
-
-            <div className="flex-1 overflow-y-auto px-4 py-8 flex flex-col justify-between max-w-md mx-auto w-full">
-              {/* Flashcard Area */}
-              <div className="flex-1 flex items-center justify-center py-6">
-                <div 
-                  onClick={() => setShowAnswer(p => !p)}
-                  className={cn(
-                    "w-full aspect-[4/5] max-h-[350px] bg-[#121212] border border-white/5 rounded-[2.5rem] p-8 flex flex-col justify-between cursor-pointer relative shadow-2xl overflow-hidden hover:border-purple-500/30 transition-all duration-500 select-none",
-                    showAnswer ? "shadow-purple-950/10 border-purple-500/20" : ""
-                  )}
-                >
-                  <div className="absolute top-4 right-6 text-[8px] font-black tracking-widest text-[#7F77DD] py-1 px-2.5 bg-purple-600/10 rounded-full uppercase">
-                    {dueCards[currentReviewIndex].topic}
-                  </div>
-
-                  <div className="flex-1 flex flex-col justify-center items-center text-center p-2">
-                    {!showAnswer ? (
-                      <div className="space-y-4">
-                        <p className="text-[8px] font-black uppercase tracking-widest text-white/30">Question</p>
-                        <h2 className="text-sm font-black text-white leading-relaxed">{dueCards[currentReviewIndex].front}</h2>
-                      </div>
-                    ) : (
-                      <div className="space-y-4">
-                        <p className="text-[8px] font-black uppercase tracking-widest text-purple-400">Answer</p>
-                        <p className="text-xs font-medium text-gray-300 leading-relaxed">{dueCards[currentReviewIndex].back}</p>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="text-center">
-                    <p className="text-[8px] font-black uppercase text-gray-500 tracking-widest">
-                      {showAnswer ? "Tap to Flip back" : "Tap to Flip & Answer"}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Controls */}
-              <div className="space-y-4 pt-6 shrink-0">
-                {!showAnswer ? (
-                  <button 
-                    onClick={() => setShowAnswer(true)} 
-                    className="w-full py-5 bg-purple-600 hover:bg-purple-700 text-white rounded-[2rem] font-black uppercase tracking-widest text-xs shadow-lg shadow-purple-900/15"
-                  >
-                    Flip Karo 🔄
-                  </button>
-                ) : (
-                  <div className="space-y-3">
-                    <p className="text-[9px] font-black uppercase text-gray-500 text-center tracking-wider mb-1">Aapko kitna yaad tha?</p>
-                    <div className="grid grid-cols-4 gap-2">
-                      <button 
-                        onClick={() => handleReviewRating(dueCards[currentReviewIndex].id, 1)} 
-                        className="py-4 bg-red-600/10 hover:bg-red-600/20 text-red-400 rounded-2xl text-[9px] font-black uppercase tracking-wider flex flex-col items-center gap-1 border border-red-500/10"
-                      >
-                        <span className="text-sm">❌</span> Forgot
-                      </button>
-                      <button 
-                        onClick={() => handleReviewRating(dueCards[currentReviewIndex].id, 2)} 
-                        className="py-4 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 rounded-2xl text-[9px] font-black uppercase tracking-wider flex flex-col items-center gap-1 border border-amber-500/10"
-                      >
-                        <span className="text-sm">🤨</span> Hard
-                      </button>
-                      <button 
-                        onClick={() => handleReviewRating(dueCards[currentReviewIndex].id, 3)} 
-                        className="py-4 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded-2xl text-[9px] font-black uppercase tracking-wider flex flex-col items-center gap-1 border border-blue-500/10"
-                      >
-                        <span className="text-sm font-semibold">👍</span> Good
-                      </button>
-                      <button 
-                        onClick={() => handleReviewRating(dueCards[currentReviewIndex].id, 4)} 
-                        className="py-4 bg-green-600/10 hover:bg-green-600/20 text-green-400 rounded-2xl text-[9px] font-black uppercase tracking-wider flex flex-col items-center gap-1 border border-green-500/10"
-                      >
-                        <span className="text-sm">🥳</span> Easy
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </motion.div>
+          <Suspense fallback={<LoadingDots />}>
+            <FlashcardReview
+              dueCards={dueCards}
+              currentReviewIndex={currentReviewIndex}
+              setCurrentReviewIndex={setCurrentReviewIndex}
+              showAnswer={showAnswer}
+              setShowAnswer={setShowAnswer}
+              setIsReviewMode={setIsReviewMode}
+              handleReviewRating={handleReviewRating}
+            />
+          </Suspense>
         )}
 
         {/* Feature 1: Spaced Repetition Complete Overlay */}
@@ -1146,176 +1252,20 @@ export default function App() {
 
         {/* Feature 2: Daily 10-Minute Challenge Overlay */}
         {isChallengeMode && challenge && (
-          <motion.div key="challenge-mode-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#0A0A0A] flex flex-col">
-            <header className="h-16 border-b border-white/5 flex items-center justify-between px-4">
-              <div className="flex items-center gap-3">
-                <button 
-                  onClick={() => {
-                    setConfirmModal({
-                      title: "Chhod Ke Jana Hai?",
-                      msg: "Agar abhi gaye to aaj ka attempt fail ho jayega.",
-                      confirmText: "Quit Karo",
-                      cancelText: "Pura Karunga",
-                      danger: true,
-                      action: () => {
-                        completeChallenge(0, 600 - challengeTimer);
-                        setIsChallengeMode(false);
-                        setConfirmModal(null);
-                      }
-                    });
-                  }} 
-                  className="p-2 -ml-2 hover:bg-white/5 rounded-full"
-                >
-                  <X className="w-5 h-5 text-gray-400" />
-                </button>
-                <div className="leading-none">
-                  <h3 className="font-black text-xs uppercase tracking-wider text-purple-400">Daily Challenge</h3>
-                  <p className="text-[9px] text-gray-500 font-bold uppercase">Question {challengeCurrentIndex + 1} of 5</p>
-                </div>
-              </div>
-              
-              <div className={cn(
-                "px-3 py-1.5 rounded-full text-xs font-black uppercase tracking-widest border flex items-center gap-2",
-                challengeTimer < 60 
-                  ? "bg-red-500/10 border-red-500/30 text-red-500 animate-pulse" 
-                  : "bg-purple-500/10 border-purple-500/20 text-purple-400"
-              )}>
-                <Clock className="w-3.5 h-3.5" />
-                {Math.floor(challengeTimer / 60)}:{(challengeTimer % 60) < 10 ? '0' : ''}{challengeTimer % 60}
-              </div>
-            </header>
-
-            {/* Question Step Indicators */}
-            <div className="grid grid-cols-5 gap-1 px-4 py-2 bg-white/5">
-              {[0, 1, 2, 3, 4].map((idx) => (
-                <div 
-                  key={`indicator-${idx}`} 
-                  className={cn(
-                    "h-1 rounded-full px-1 transition-all duration-300",
-                    idx === challengeCurrentIndex 
-                      ? "bg-purple-500" 
-                      : (challengeAnswers[idx]) 
-                        ? "bg-purple-900" 
-                        : "bg-white/10"
-                  )}
-                />
-              ))}
-            </div>
-
-            <div className="flex-1 overflow-y-auto px-4 py-8 flex flex-col justify-between max-w-sm mx-auto w-full">
-              {/* Question card */}
-              <div className="flex-1 flex flex-col justify-center py-4">
-                <div className="bg-[#121212] border border-white/5 rounded-[2rem] p-6 space-y-6">
-                  <div className="space-y-2">
-                    <span className="text-[9px] px-2 py-1 bg-purple-500/10 text-purple-400 rounded-full uppercase font-black tracking-widest">
-                      {challenge.questions[challengeCurrentIndex].type.toUpperCase()}
-                    </span>
-                    <h2 className="text-sm font-black leading-relaxed text-white">
-                      {challenge.questions[challengeCurrentIndex].question}
-                    </h2>
-                  </div>
-
-                  {/* Render options for MCQs */}
-                  {challenge.questions[challengeCurrentIndex].type === 'mcq' && challenge.questions[challengeCurrentIndex].options && (
-                    <div className="grid grid-cols-1 gap-2">
-                      {challenge.questions[challengeCurrentIndex].options?.map((opt, oIdx) => {
-                        const optLetter = String.fromCharCode(65 + oIdx); // A, B, C, D
-                        const isSelected = challengeAnswers[challengeCurrentIndex] === optLetter;
-                        return (
-                          <button
-                            key={`option-${oIdx}`}
-                            onClick={() => {
-                              const updatedAnswers = [...challengeAnswers];
-                              updatedAnswers[challengeCurrentIndex] = optLetter;
-                              setChallengeAnswers(updatedAnswers);
-                            }}
-                            className={cn(
-                              "w-full text-left p-4 rounded-xl text-xs font-black uppercase flex items-center gap-3 transition-all border border-white/5",
-                              isSelected 
-                                ? "bg-purple-600 text-white border-purple-500 shadow-lg shadow-purple-900/10" 
-                                : "bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white"
-                            )}
-                          >
-                            <span className={cn(
-                              "w-6 h-6 rounded-lg font-black text-[10px] flex items-center justify-center border",
-                              isSelected ? "bg-white/10 border-white/20 text-white" : "bg-white/5 border-white/5 text-gray-500"
-                            )}>{optLetter}</span>
-                            {opt}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Render for Fill in blanks */}
-                  {challenge.questions[challengeCurrentIndex].type === 'fill' && (
-                    <div className="space-y-2">
-                      <p className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Apna Uttar Likho</p>
-                      <input
-                        type="text"
-                        value={challengeAnswers[challengeCurrentIndex] || ''}
-                        onChange={(e) => {
-                          const updatedAnswers = [...challengeAnswers];
-                          updatedAnswers[challengeCurrentIndex] = e.target.value;
-                          setChallengeAnswers(updatedAnswers);
-                        }}
-                        placeholder="Yahan type karo..."
-                        className="w-full bg-[#181818] border border-white/5 text-white p-4 rounded-xl text-xs font-bold outline-none focus:border-purple-500/40 focus:ring-1 focus:ring-purple-500/20"
-                      />
-                    </div>
-                  )}
-
-                  {/* Render for Short Answer */}
-                  {challenge.questions[challengeCurrentIndex].type === 'short' && (
-                    <div className="space-y-2">
-                      <p className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Apna Uttar Likho (Keywords match honge)</p>
-                      <textarea
-                        rows={3}
-                        value={challengeAnswers[challengeCurrentIndex] || ''}
-                        onChange={(e) => {
-                          const updatedAnswers = [...challengeAnswers];
-                          updatedAnswers[challengeCurrentIndex] = e.target.value;
-                          setChallengeAnswers(updatedAnswers);
-                        }}
-                        placeholder="Ek ya do shabdon mein likhein..."
-                        className="w-full bg-[#181818] border border-white/5 text-white p-4 rounded-xl text-xs font-bold outline-none focus:border-purple-500/40 focus:ring-1 focus:ring-purple-500/20 resize-none"
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Progress buttons */}
-              <div className="flex gap-3 pt-4 shrink-0">
-                {challengeCurrentIndex > 0 ? (
-                  <button
-                    onClick={() => setChallengeCurrentIndex(prev => prev - 1)}
-                    className="flex-1 py-4 bg-white/5 hover:bg-white/10 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all"
-                  >
-                    ← Peeche
-                  </button>
-                ) : <div className="flex-1" />}
-
-                {challengeCurrentIndex < 4 ? (
-                  <button
-                    disabled={!challengeAnswers[challengeCurrentIndex]}
-                    onClick={() => setChallengeCurrentIndex(prev => prev + 1)}
-                    className="flex-1 py-4 bg-purple-600 disabled:opacity-40 hover:bg-purple-700 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-md shadow-purple-950/20"
-                  >
-                    Aage Chalo →
-                  </button>
-                ) : (
-                  <button
-                    disabled={challengeAnswers.filter(Boolean).length < 5}
-                    onClick={submitChallengeAndShowResults}
-                    className="flex-1 py-4 bg-green-600 disabled:opacity-40 hover:bg-green-700 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-md shadow-green-950/20"
-                  >
-                    Submit Karo 🚀
-                  </button>
-                )}
-              </div>
-            </div>
-          </motion.div>
+          <Suspense fallback={<LoadingDots />}>
+            <DailyChallenge
+              challenge={challenge}
+              challengeCurrentIndex={challengeCurrentIndex}
+              setChallengeCurrentIndex={setChallengeCurrentIndex}
+              challengeAnswers={challengeAnswers}
+              setChallengeAnswers={setChallengeAnswers}
+              challengeTimer={challengeTimer}
+              setConfirmModal={setConfirmModal}
+              completeChallenge={completeChallenge}
+              setIsChallengeMode={setIsChallengeMode}
+              submitChallengeAndShowResults={submitChallengeAndShowResults}
+            />
+          </Suspense>
         )}
 
         {/* Feature 2: Daily Challenge Completed Overlay */}
@@ -1443,11 +1393,24 @@ export default function App() {
             <p className="text-[8px] font-black text-white/30 uppercase tracking-widest">Namaste, {user.name.split(' ')[0]}!</p>
           </div>
         </div>
-        {currentMode !== 'selection' && (
-          <button onClick={() => setConfirmModal({ title: "New Chat?", msg: "Current chat library mein save ho jayegi.", action: () => { saveChat(); handleModeSelect(currentMode); setConfirmModal(null); } })} className="text-[9px] font-black uppercase tracking-widest bg-white/5 px-3 py-2 rounded-full border border-white/5 flex items-center gap-2">
-            <RefreshCcw className="w-3 h-3" /> New Chat
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={toggleTheme}
+            className="p-2 bg-white/5 hover:bg-white/10 rounded-full border border-white/5 flex items-center justify-center transition-all duration-300"
+            title={theme === 'deep-space' ? "Switch to Paper Light Mode" : "Switch to Deep Space Dark Mode"}
+          >
+            {theme === 'deep-space' ? (
+              <Sun className="w-4 h-4 text-yellow-400" />
+            ) : (
+              <Moon className="w-4 h-4 text-purple-600" />
+            )}
           </button>
-        )}
+          {currentMode !== 'selection' && (
+            <button onClick={() => setConfirmModal({ title: "New Chat?", msg: "Current chat library mein save ho jayegi.", action: () => { saveChat(); handleModeSelect(currentMode); setConfirmModal(null); } })} className="text-[9px] font-black uppercase tracking-widest bg-white/5 px-3 py-2 rounded-full border border-white/5 flex items-center gap-2">
+              <RefreshCcw className="w-3 h-3" /> New Chat
+            </button>
+          )}
+        </div>
       </header>
 
       <main className="flex-1 flex flex-col relative overflow-hidden">
@@ -1658,8 +1621,8 @@ export default function App() {
                                 const updatedChats = library.recentChats.filter(x => x.id !== c.id);
                                 const updatedLibrary = { ...library, recentChats: updatedChats };
                                 setLibrary(updatedLibrary);
-                                localStorage.setItem('nc_l', JSON.stringify(updatedLibrary));
-                                localStorage.setItem('savedChats', JSON.stringify(updatedChats));
+                                safeSet(STORAGE_KEYS.library, updatedLibrary);
+                                safeSet(STORAGE_KEYS.chats, updatedChats);
                                 setConfirmModal(null);
                                 setSuccessToast("Chat delete ho gayi ✅");
                                 setTimeout(() => setSuccessToast(null), 2000);
@@ -1705,7 +1668,7 @@ export default function App() {
                                 const updatedNotes = library.savedNotes.filter(x => x.id !== n.id);
                                 const updatedLibrary = { ...library, savedNotes: updatedNotes };
                                 setLibrary(updatedLibrary);
-                                localStorage.setItem('nc_l', JSON.stringify(updatedLibrary));
+                                safeSet(STORAGE_KEYS.library, updatedLibrary);
                                 setConfirmModal(null);
                                 setSuccessToast("Note delete ho gayi ✅");
                                 setTimeout(() => setSuccessToast(null), 2000);
@@ -2006,7 +1969,7 @@ function ModeGrid({ onSelect, streak }: any) {
   );
 }
 
-function MsgBubble({ m, index, isSpeaking, onSpeak, onSave, mode, onWrongAnswer, onDownloadPDF }: { m: Message, index: number, isSpeaking: boolean, onSpeak: () => void, onSave: () => void, mode: Mode, onWrongAnswer: (t: string) => void, onDownloadPDF: (content: string, mode: Mode) => void }) {
+const MsgBubble = React.memo(function MsgBubble({ m, index, isSpeaking, onSpeak, onSave, mode, onWrongAnswer, onDownloadPDF }: { m: Message, index: number, isSpeaking: boolean, onSpeak: () => void, onSave: () => void, mode: Mode, onWrongAnswer: (t: string) => void, onDownloadPDF: (content: string, mode: Mode) => void }) {
   const [selectedOptions, setSelectedOptions] = useState<Record<number, string>>({});
   const [showExplanations, setShowExplanations] = useState<Record<number, boolean>>({});
   const isUser = m.role === 'user';
@@ -2166,7 +2129,7 @@ function MsgBubble({ m, index, isSpeaking, onSpeak, onSave, mode, onWrongAnswer,
       </div>
     </div>
   );
-}
+});
 
 function SecureHTML({ content }: { content: string }) {
   const sanitized = DOMPurify.sanitize(marked.parse(content) as string, {
@@ -2201,7 +2164,7 @@ function ExamCard({ e, onAsk }: any) {
   );
 }
 
-function ExamCountdownCard({ ex, onDelete }: { ex: Exam, onDelete: () => void }) {
+function ExamCountdownCard({ ex, onDelete }: { ex: Exam, onDelete: () => void, key?: string }) {
   const getDaysLeft = (dateStr: string) => {
     const target = new Date(dateStr);
     target.setHours(0,0,0,0);
@@ -2259,7 +2222,7 @@ function ExamCountdownCard({ ex, onDelete }: { ex: Exam, onDelete: () => void })
   );
 }
 
-function AddExamModal({ onClose, onSave }: { onClose: () => void, onSave: (ex: Exam) => void }) {
+function AddExamModal({ onClose, onSave }: { onClose: () => void, onSave: (ex: Exam) => void, key?: string }) {
   const [name, setName] = useState('');
   const [date, setDate] = useState('');
   const [subject, setSubject] = useState('All Subjects');
@@ -2350,7 +2313,7 @@ function AddExamModal({ onClose, onSave }: { onClose: () => void, onSave: (ex: E
   );
 }
 
-function EditProfileModal({ user, onClose, onSave }: { user: UserData, onClose: () => void, onSave: (u: UserData) => void }) {
+function EditProfileModal({ user, onClose, onSave }: { user: UserData, onClose: () => void, onSave: (u: UserData) => void, key?: string }) {
   const [name, setName] = useState(user.name);
   const [grade, setGrade] = useState(user.gradePreference);
   const [language, setLanguage] = useState(user.language);
@@ -2519,7 +2482,7 @@ function ConfirmDialog({ title, msg, onConfirm, onCancel, confirmText = "Confirm
   );
 }
 
-function Nudge({ text }: { text: string }) {
+function Nudge({ text }: { text: string, key?: string }) {
   return <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 20, opacity: 0 }} className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[60] bg-white text-black px-6 py-3 rounded-full font-black uppercase text-[10px] tracking-widest shadow-2xl">{text}</motion.div>;
 }
 
